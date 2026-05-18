@@ -1,0 +1,10 @@
+node_modules
+dist
+.polychat
+rust/target/
+polychat-*.tgz
+*.enc
+.env
+artifacts/
+bin/*/polychat-server
+bin/*/polychat-server.exe

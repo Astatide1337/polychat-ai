@@ -1,0 +1,72 @@
+{
+  "name": "polychat-ai",
+  "version": "0.1.0",
+  "description": "Self-hosted browser-backed AI CLI and local OpenAI-compatible API server.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "polychat": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai",
+    "cli",
+    "openai-compatible",
+    "browser",
+    "claude",
+    "chatgpt",
+    "deepseek",
+    "gemini",
+    "kimi"
+  ],
+  "author": "Soham",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sohamb/polychat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sohamb/polychat/issues"
+  },
+  "homepage": "https://github.com/sohamb/polychat#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsup",
+    "build:server": "cargo build --release --manifest-path rust/Cargo.toml",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "test": "node --test test/**/*.test.mjs",
+    "conformance:report": "node scripts/conformance-report.mjs",
+    "stage:binary": "node scripts/stage-binary.mjs",
+    "stage:binary:all": "node scripts/stage-binary.mjs --all",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:package:all": "node scripts/verify-package.mjs --all",
+    "prepack": "npm run build && npm run build:server && npm run stage:binary && npm run verify:package",
+    "prepublishOnly": "npm run verify:package:all",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "default-browser": "^5.5.0",
+    "get-browser-path": "^1.1.0",
+    "ink": "^7.0.2",
+    "ink-text-input": "^6.0.0",
+    "node-sqlite3-wasm": "^0.8.0",
+    "ora": "^9.4.0",
+    "react": "^19.2.6",
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "@types/react": "^19.2.14",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  }
+}

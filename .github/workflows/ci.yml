@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run TypeScript tests
+        run: node --test test/**/*.test.mjs
+
+      - name: Run Rust tests
+        working-directory: rust
+        run: cargo test --bin polychat-server
+
+      - name: Build Rust release binary
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Prepare npm package binary layout
+        run: npm run stage:binary
+
+      - name: Check npm package contents
+        run: npm pack --dry-run
+
+  build-release-binaries:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_id: linux-x64
+            runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            binary_name: polychat-server
+          - target_id: linux-arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            binary_name: polychat-server
+          - target_id: darwin-x64
+            runner: macos-13
+            rust_target: x86_64-apple-darwin
+            binary_name: polychat-server
+          - target_id: darwin-arm64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+            binary_name: polychat-server
+          - target_id: win32-x64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            binary_name: polychat-server.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build release binary
+        working-directory: rust
+        run: cargo build --release --target ${{ matrix.rust_target }} --bin polychat-server
+
+      - name: Stage artifact directory
+        shell: bash
+        run: |
+          mkdir -p artifacts/${{ matrix.target_id }}
+          cp rust/target/${{ matrix.rust_target }}/release/${{ matrix.binary_name }} artifacts/${{ matrix.target_id }}/${{ matrix.binary_name }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target_id }}
+          path: artifacts/${{ matrix.target_id }}/${{ matrix.binary_name }}
+
+  publish-npm:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    needs: build-release-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download packaged server artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage and verify all package binaries
+        run: |
+          npm run stage:binary:all
+          npm run verify:package:all
+
+      - name: Run package gates
+        run: |
+          npm run build
+          node --test test/**/*.test.mjs
+          cargo test --bin polychat-server --manifest-path rust/Cargo.toml
+          npm pack --dry-run
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
