@@ -72,6 +72,8 @@ describe("Production readiness", () => {
     assert.match(ci, /cargo test --bin polychat-server/);
     assert.match(ci, /cargo build --release/);
     assert.match(ci, /npm pack --dry-run/);
+    assert.match(ci, /id-token: write/);
+    assert.doesNotMatch(ci, /NODE_AUTH_TOKEN/);
   });
 
   it("README documents quickstart security providers and OpenAI usage", () => {
