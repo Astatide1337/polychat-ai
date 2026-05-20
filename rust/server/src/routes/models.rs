@@ -7,18 +7,26 @@ use serde_json::{json, Value};
 use crate::routes::errors::RouteError;
 use crate::routes::resolver::{Providers, find_model, list_connected_models};
 
+fn serialize_model(model: crate::providers::ModelInfo) -> Value {
+    let mut value = json!({
+        "id": model.id,
+        "name": model.name,
+        "object": "model",
+        "created": chrono::Utc::now().timestamp(),
+        "owned_by": model.provider,
+    });
+    if let Some(capabilities) = model.capabilities {
+        value["capabilities"] = serde_json::to_value(capabilities).expect("serialize model capabilities");
+    }
+    value
+}
+
 pub async fn list_models_handler(
     providers: Providers,
 ) -> Json<Value> {
     let mut all_models = Vec::new();
     for model in list_connected_models(&providers, 20).await {
-        all_models.push(json!({
-            "id": model.id,
-            "name": model.name,
-            "object": "model",
-            "created": chrono::Utc::now().timestamp(),
-            "owned_by": model.provider,
-        }));
+        all_models.push(serialize_model(model));
     }
 
     Json(json!({
@@ -32,13 +40,7 @@ pub async fn get_model_handler(
     providers: Providers,
 ) -> (StatusCode, Json<Value>) {
     if let Some(model) = find_model(&model_id, &providers, 20).await {
-        return (StatusCode::OK, Json(json!({
-            "id": model.id,
-            "name": model.name,
-            "object": "model",
-            "created": chrono::Utc::now().timestamp(),
-            "owned_by": model.provider,
-        })));
+        return (StatusCode::OK, Json(serialize_model(model)));
     }
 
     RouteError::new(

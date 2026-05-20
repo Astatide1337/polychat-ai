@@ -51,6 +51,8 @@ pub async fn generate_handler(
     let options = ChatOptions {
         temperature: body.options.as_ref().and_then(|o| o.temperature),
         max_tokens: body.options.as_ref().and_then(|o| o.num_predict),
+        reasoning_effort: None,
+        stream: body.stream,
         stop: vec![],
         tools: Vec::new(),
         tool_choice: None,

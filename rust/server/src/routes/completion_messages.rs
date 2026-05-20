@@ -3,18 +3,21 @@ use serde_json::Value;
 
 use crate::providers::ChatMessage;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CompletionRequest {
     pub model: String,
     pub messages: Vec<CompletionMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stop: Vec<String>,
     pub tools: Option<Vec<Value>>,
     pub tool_choice: Option<Value>,
+    #[serde(alias = "providerConversationId")]
     pub provider_conversation_id: Option<String>,
 }
 
@@ -50,7 +53,14 @@ pub fn content_to_text(content: &Option<Value>) -> String {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Array(parts)) => parts
             .iter()
-            .filter_map(|p| p.as_str())
+            .filter_map(|p| {
+                p.as_str().map(str::to_string).or_else(|| {
+                    p.as_object()
+                        .and_then(|obj| obj.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+            })
             .collect::<Vec<_>>()
             .join(""),
         Some(Value::Object(obj)) => obj
@@ -125,4 +135,58 @@ pub fn latest_user_text(messages: &[CompletionMessage]) -> Option<String> {
         .rev()
         .find(|msg| msg.role == "user")
         .map(|msg| content_to_text(&msg.content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        completion_messages_to_provider_messages, content_to_text, CompletionMessage,
+        CompletionRequest,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn content_to_text_extracts_openai_text_parts() {
+        let content = Some(json!([
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"}
+        ]));
+
+        assert_eq!(content_to_text(&content), "hello world");
+    }
+
+    #[test]
+    fn provider_messages_keep_text_from_array_parts() {
+        let messages = vec![CompletionMessage {
+            role: "user".into(),
+            content: Some(json!([
+                {"type": "text", "text": "Use the skill"},
+                {"type": "input_text", "text": " now"}
+            ])),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }];
+
+        let provider_messages = completion_messages_to_provider_messages(&messages);
+
+        assert_eq!(provider_messages.len(), 1);
+        assert_eq!(provider_messages[0].content, "Use the skill now");
+    }
+
+    #[test]
+    fn completion_request_accepts_camel_case_provider_conversation_id() {
+        let body = json!({
+            "model": "gpt-5-5",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "providerConversationId": "conv-123"
+        });
+
+        let request: CompletionRequest = serde_json::from_value(body).expect("deserialize request");
+
+        assert_eq!(
+            request.provider_conversation_id.as_deref(),
+            Some("conv-123")
+        );
+    }
 }

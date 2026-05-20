@@ -85,6 +85,7 @@ mod tests {
             name: id.into(),
             provider: provider.into(),
             provider_model: None,
+            capabilities: None,
         }
     }
 

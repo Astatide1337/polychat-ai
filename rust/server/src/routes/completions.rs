@@ -59,6 +59,8 @@ pub async fn completions_handler(
     let mut options = ChatOptions {
         temperature: body.temperature,
         max_tokens: body.max_tokens,
+        reasoning_effort: body.reasoning_effort.clone(),
+        stream: body.stream,
         stop: body.stop.clone(),
         tools: Vec::new(),
         tool_choice: None,

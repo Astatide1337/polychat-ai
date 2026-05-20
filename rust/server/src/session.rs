@@ -8,11 +8,11 @@
 //! supports this via `AesGcm<Aes256, U16>` (16-byte nonce variant).
 
 use aes::cipher::consts::U16;
-use aes_gcm::aead::{Aead, KeyInit, OsRng, AeadCore};
-use aes_gcm::{AesGcm, Nonce};
 use aes::Aes256;
-use base64::Engine;
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::{AesGcm, Nonce};
 use anyhow::{anyhow, bail, Context};
+use base64::Engine;
 use scrypt::scrypt as scrypt_derive;
 use scrypt::Params;
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,13 @@ fn scrypt_key(secret: &str, salt: &str) -> anyhow::Result<[u8; 32]> {
     let password = format!("{}:{}", secret, salt);
     let params = Params::new(14, 8, 1, 32).map_err(|e| anyhow!("scrypt params: {}", e))?;
     let mut key = [0u8; 32];
-    scrypt_derive(password.as_bytes(), b"polychat-session-key", &params, &mut key)
-        .map_err(|e| anyhow!("scrypt derive: {}", e))?;
+    scrypt_derive(
+        password.as_bytes(),
+        b"polychat-session-key",
+        &params,
+        &mut key,
+    )
+    .map_err(|e| anyhow!("scrypt derive: {}", e))?;
     Ok(key)
 }
 
@@ -53,8 +58,7 @@ pub fn derive_transport_key(api_key: &str, nonce: &str, salt: &str) -> anyhow::R
 // ---------------------------------------------------------------------------
 
 pub fn encrypt(data: &str, key: &[u8; 32]) -> anyhow::Result<Vec<u8>> {
-    let cipher = Aes256GcmN16::new_from_slice(key)
-        .map_err(|e| anyhow!("cipher init: {}", e))?;
+    let cipher = Aes256GcmN16::new_from_slice(key).map_err(|e| anyhow!("cipher init: {}", e))?;
 
     // Generate 16-byte nonce
     let nonce_bytes = Aes256GcmN16::generate_nonce(&mut OsRng);
@@ -88,8 +92,7 @@ pub fn decrypt(encrypted: &[u8], key: &[u8; 32]) -> anyhow::Result<String> {
     let (tag_bytes, ciphertext) = rest.split_at(16);
 
     let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = Aes256GcmN16::new_from_slice(key)
-        .map_err(|e| anyhow!("cipher init: {}", e))?;
+    let cipher = Aes256GcmN16::new_from_slice(key).map_err(|e| anyhow!("cipher init: {}", e))?;
 
     // aes-gcm expects [ciphertext][tag]
     let mut combined = Vec::with_capacity(ciphertext.len() + 16);
@@ -142,7 +145,9 @@ pub struct CookieEntry {
 }
 #[allow(dead_code)]
 
-fn default_path() -> String { "/".into() }
+fn default_path() -> String {
+    "/".into()
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,7 +156,6 @@ pub struct LocalStorageEntry {
     pub value: String,
 }
 #[allow(dead_code)]
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginEntry {
     pub origin: String,
@@ -198,7 +202,9 @@ pub fn session_kind(value: &SessionValue) -> SessionKind {
 /// Deserializes an OAuth session from a `SessionValue`, returning None if it is not
 /// an OAuth session or if required fields are missing.
 pub fn as_oauth_session(value: &SessionValue) -> Option<OAuthSession> {
-    if session_kind(value) != SessionKind::OAuthSession { return None; }
+    if session_kind(value) != SessionKind::OAuthSession {
+        return None;
+    }
     serde_json::from_value(value.clone()).ok()
 }
 
@@ -234,7 +240,11 @@ pub fn has_session(provider: &str) -> bool {
 
 pub fn delete_session(provider: &str) -> bool {
     let path = session_path(provider);
-    if path.exists() { fs::remove_file(path).is_ok() } else { false }
+    if path.exists() {
+        fs::remove_file(path).is_ok()
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +283,9 @@ pub fn unseal_transport_envelope(
 // ---------------------------------------------------------------------------
 
 pub fn safe_equal(a: &str, b: &str) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let mut result: u8 = 0;
@@ -351,7 +363,6 @@ mod nodejs_compat_test {
         match decrypt(&wire, &key) {
             Ok(plaintext) => {
                 assert_eq!(plaintext, "hello");
-                println!("SUCCESS: Node.js GCM 16-byte IV is compatible!");
             }
             Err(e) => {
                 panic!("FAILED to decrypt Node.js output: {}. The aes-gcm crate's 16-byte nonce handling differs from Node.js.", e);

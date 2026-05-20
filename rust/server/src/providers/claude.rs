@@ -386,6 +386,7 @@ fn normalize_claude_models(convos: &[Value]) -> Vec<ModelInfo> {
                     name,
                     provider: "claude".into(),
                     provider_model: None,
+                    capabilities: None,
                 });
             }
         }
@@ -399,6 +400,7 @@ fn normalize_claude_models(convos: &[Value]) -> Vec<ModelInfo> {
                 name: name.to_string(),
                 provider: "claude".into(),
                 provider_model: None,
+                capabilities: None,
             });
         }
     }

@@ -5,15 +5,136 @@ const TOOL_END: &str = "</polychat_tool_call>";
 const FINAL_START: &str = "<polychat_final>";
 const FINAL_END: &str = "</polychat_final>";
 
+#[derive(Debug, Default)]
+enum StreamingParseState {
+    #[default]
+    Searching,
+    Final {
+        content_start: usize,
+        emitted_until: usize,
+    },
+    ToolCall,
+}
+
+#[derive(Debug, Default)]
+pub struct StreamingEmulatedParser {
+    buffer: String,
+    state: StreamingParseState,
+}
+
 #[derive(Debug)]
 pub enum EmulatedToolResult {
     Final(String),
     ToolCall { name: String, arguments: String },
 }
 
+impl StreamingEmulatedParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn feed(&mut self, text: &str) -> Vec<String> {
+        self.buffer.push_str(text);
+        self.extract_ready_final_content()
+    }
+
+    pub fn raw_output(&self) -> &str {
+        &self.buffer
+    }
+
+    fn extract_ready_final_content(&mut self) -> Vec<String> {
+        let mut chunks = Vec::new();
+
+        loop {
+            match self.state {
+                StreamingParseState::Searching => {
+                    let final_idx = self.buffer.find(FINAL_START);
+                    let tool_idx = self.buffer.find(TOOL_START);
+                    let next = match (final_idx, tool_idx) {
+                        (Some(f), Some(t)) if f < t => Some((true, f)),
+                        (Some(_), Some(t)) => Some((false, t)),
+                        (Some(f), None) => Some((true, f)),
+                        (None, Some(t)) => Some((false, t)),
+                        (None, None) => None,
+                    };
+
+                    let Some((is_final, idx)) = next else {
+                        break;
+                    };
+
+                    if !self.buffer[..idx].trim().is_empty() {
+                        break;
+                    }
+
+                    if is_final {
+                        let content_start = idx + FINAL_START.len();
+                        self.state = StreamingParseState::Final {
+                            content_start,
+                            emitted_until: content_start,
+                        };
+                    } else {
+                        self.state = StreamingParseState::ToolCall;
+                        break;
+                    }
+                }
+                StreamingParseState::Final {
+                    content_start,
+                    emitted_until,
+                } => {
+                    let close_idx = self.buffer[content_start..]
+                        .find(FINAL_END)
+                        .map(|rel| content_start + rel);
+                    let safe_end = if let Some(close_idx) = close_idx {
+                        close_idx
+                    } else {
+                        let remaining = &self.buffer[content_start..];
+                        let withheld = shared_prefix_suffix_len(remaining, FINAL_END);
+                        self.buffer.len().saturating_sub(withheld)
+                    };
+
+                    let safe_end = clamp_to_char_boundary(&self.buffer, safe_end);
+                    if safe_end > emitted_until {
+                        chunks.push(self.buffer[emitted_until..safe_end].to_string());
+                        self.state = StreamingParseState::Final {
+                            content_start,
+                            emitted_until: safe_end,
+                        };
+                    }
+
+                    break;
+                }
+                StreamingParseState::ToolCall => break,
+            }
+        }
+
+        chunks
+    }
+}
+
+fn clamp_to_char_boundary(text: &str, mut idx: usize) -> usize {
+    idx = idx.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn shared_prefix_suffix_len(text: &str, pattern: &str) -> usize {
+    let max = text.len().min(pattern.len().saturating_sub(1));
+    for len in (1..=max).rev() {
+        if text.ends_with(&pattern[..len]) {
+            return len;
+        }
+    }
+
+    0
+}
+
 pub fn build_emulated_tool_prompt(tools: &[Value], tool_choice: Option<&Value>) -> String {
     let mut prompt = String::from(
-        "You are operating in a strict tool protocol. Respond with exactly one block and no other text.\n\n\
+        "You have access to tools, but tools are optional unless they are clearly necessary or explicitly required. Respond with exactly one block and no other text.\n\n\
+Prefer a direct `<polychat_final>` answer when you can make useful progress from the conversation alone. This includes asking a clarifying question, proposing a plan, summarizing, or reasoning about the user's request without touching files or running commands.\n\n\
+Use a `<polychat_tool_call>` only when a tool will materially improve the answer or the user explicitly asked for that tool action. Do not call tools just because they exist. Do not write files, inspect the filesystem, or run commands unless the task truly needs it right now.\n\n\
 If you can answer directly, respond with:\n\
 <polychat_final>\n\
 your final user-facing answer\n\
@@ -33,7 +154,8 @@ Rules:\n\
 - Never mention or call a tool that is not listed below.\n\
 - If the user already provided a tool result, use it to continue and either answer or call one next tool.\n\
 - Never pretend a tool was run if it was not.\n\
-- If the answer depends on the current filesystem, current working directory, environment, command output, external state, or any information not present in the transcript, you must call a tool instead of guessing.\n\n\
+- If the answer depends on the current filesystem, current working directory, environment, command output, external state, or any information not present in the transcript, call a tool instead of guessing.\n\
+- If the user is asking for planning, scoping, brainstorming, or clarification, prefer `<polychat_final>` and continue the conversation naturally unless a tool is genuinely needed.\n\n\
 Available tools:",
     );
 
@@ -96,6 +218,10 @@ pub fn parse_emulated_tool_response(text: &str) -> Result<EmulatedToolResult, St
         return Err("response was empty".into());
     }
 
+    if let Some((name, arguments)) = parse_standalone_tool_call(trimmed) {
+        return Ok(EmulatedToolResult::ToolCall { name, arguments });
+    }
+
     let tool_blocks = find_blocks(trimmed, TOOL_START, TOOL_END);
     let final_blocks = find_blocks(trimmed, FINAL_START, FINAL_END);
 
@@ -141,6 +267,19 @@ pub fn parse_emulated_tool_response(text: &str) -> Result<EmulatedToolResult, St
     }
 
     Err("response did not include a polychat block".into())
+}
+
+fn parse_standalone_tool_call(text: &str) -> Option<(String, String)> {
+    if let Some(parsed) = parse_tool_block_body(text) {
+        return Some(parsed);
+    }
+
+    let fenced = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))?
+        .trim();
+    let fenced = fenced.strip_suffix("```")?.trim();
+    parse_tool_block_body(fenced)
 }
 
 pub fn validate_emulated_tool_call(
@@ -222,6 +361,25 @@ pub fn build_repair_prompt_with_context(
             "\nAllowed tool names: {}.",
             allowed_tools.join(", ")
         ));
+    }
+
+    if !tools.is_empty() {
+        prompt.push_str("\nTool schemas:");
+        for tool in tools {
+            if let Some(function) = tool.get("function") {
+                let name = function
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let params = function
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Ok(compact) = serde_json::to_string(&params) {
+                    prompt.push_str(&format!("\n- {} parameters: {}", name, compact));
+                }
+            }
+        }
     }
 
     match tool_choice {
@@ -567,5 +725,85 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unexpected property `description`"));
+    }
+
+    #[test]
+    fn parses_standalone_json_tool_call() {
+        let parsed =
+            parse_emulated_tool_response(r#"{"name":"write","arguments":{"path":"/tmp/spec.md"}}"#)
+                .unwrap();
+
+        match parsed {
+            EmulatedToolResult::ToolCall { name, arguments } => {
+                assert_eq!(name, "write");
+                assert_eq!(arguments, r#"{"path":"/tmp/spec.md"}"#);
+            }
+            EmulatedToolResult::Final(_) => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn parses_fenced_json_tool_call() {
+        let parsed = parse_emulated_tool_response(
+            "```json\n{\"name\":\"write\",\"arguments\":{\"path\":\"/tmp/spec.md\"}}\n```",
+        )
+        .unwrap();
+
+        match parsed {
+            EmulatedToolResult::ToolCall { name, arguments } => {
+                assert_eq!(name, "write");
+                assert_eq!(arguments, r#"{"path":"/tmp/spec.md"}"#);
+            }
+            EmulatedToolResult::Final(_) => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn repair_prompt_includes_tool_schemas() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "write",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        })];
+
+        let prompt = build_repair_prompt_with_context("missing path", &tools, None);
+        assert!(prompt.contains("Tool schemas:"));
+        assert!(prompt.contains("write parameters"));
+        assert!(prompt.contains("\"required\":[\"path\",\"content\"]"));
+    }
+
+    #[test]
+    fn streaming_parser_emits_final_content_incrementally() {
+        let mut parser = StreamingEmulatedParser::new();
+        assert_eq!(parser.feed("<polychat_final>Hello ").concat(), "Hello ");
+        assert_eq!(
+            parser.feed("world from Miranda").concat(),
+            "world from Miranda"
+        );
+        assert!(parser.feed("</polychat_final>").is_empty());
+        assert_eq!(
+            parser.raw_output(),
+            "<polychat_final>Hello world from Miranda</polychat_final>"
+        );
+    }
+
+    #[test]
+    fn streaming_parser_suppresses_tool_call_output() {
+        let mut parser = StreamingEmulatedParser::new();
+        assert!(parser
+            .feed("<polychat_tool_call>{\"name\":\"bash\"")
+            .is_empty());
+        assert!(parser
+            .feed(",\"arguments\":{}}</polychat_tool_call>")
+            .is_empty());
     }
 }

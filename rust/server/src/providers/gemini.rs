@@ -258,7 +258,7 @@ impl Provider for GeminiProvider {
 
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         Ok(KNOWN_GEMINI_MODELS.iter().map(|&(id, name)| ModelInfo {
-            id: id.into(), name: name.into(), provider: "gemini".into(), provider_model: None,
+            id: id.into(), name: name.into(), provider: "gemini".into(), provider_model: None, capabilities: None,
         }).collect())
     }
 

@@ -169,30 +169,35 @@ impl Provider for KimiProvider {
                 name: "Kimi".into(),
                 provider: "kimi".into(),
                 provider_model: None,
+                capabilities: None,
             },
             ModelInfo {
                 id: "k1".into(),
                 name: "Kimi K1".into(),
                 provider: "kimi".into(),
                 provider_model: None,
+                capabilities: None,
             },
             ModelInfo {
                 id: "k1.5".into(),
                 name: "Kimi K1.5".into(),
                 provider: "kimi".into(),
                 provider_model: None,
+                capabilities: None,
             },
             ModelInfo {
                 id: "k1.5-thinking".into(),
                 name: "Kimi K1.5 Thinking".into(),
                 provider: "kimi".into(),
                 provider_model: None,
+                capabilities: None,
             },
             ModelInfo {
                 id: "k2".into(),
                 name: "Kimi K2".into(),
                 provider: "kimi".into(),
                 provider_model: None,
+                capabilities: None,
             },
         ])
     }

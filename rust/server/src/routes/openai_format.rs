@@ -109,31 +109,31 @@ struct ChatCompletionChunkChoice {
 #[derive(Serialize, Default)]
 pub struct StreamDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<&'static str>,
+    pub role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<StreamToolCallDelta>>,
+    pub tool_calls: Option<Vec<StreamToolCallDelta>>,
 }
 
 #[derive(Serialize)]
 pub struct StreamToolCallDelta {
-    index: usize,
+    pub index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
+    pub id: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    kind: Option<&'static str>,
-    function: StreamFunctionDelta,
+    pub kind: Option<&'static str>,
+    pub function: StreamFunctionDelta,
 }
 
 #[derive(Serialize, Default)]
 pub struct StreamFunctionDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    arguments: Option<String>,
+    pub arguments: Option<String>,
 }
 
 pub fn text_completion_response(request_id: &str, model: &str, content: String) -> ChatCompletionResponse {
@@ -350,7 +350,7 @@ pub fn emulated_stream_tool_call_response(request_id: &str, model: &str, name: &
     event_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-fn event_stream_response<S>(stream: S) -> axum::response::Response
+pub(crate) fn event_stream_response<S>(stream: S) -> axum::response::Response
 where
     S: futures::Stream<Item = Result<String, std::io::Error>> + Send + 'static,
 {
@@ -361,6 +361,7 @@ where
             (header::CONTENT_TYPE, "text/event-stream".to_string()),
             (header::CACHE_CONTROL, "no-cache".to_string()),
             (header::CONNECTION, "keep-alive".to_string()),
+            (axum::http::header::HeaderName::from_static("x-accel-buffering"), "no".to_string()),
         ],
         body,
     ).into_response()

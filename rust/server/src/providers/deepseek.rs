@@ -155,6 +155,33 @@ fn format_last_user_message(messages: &[ChatMessage]) -> String {
     history
 }
 
+fn thinking_enabled_for_reasoning_effort(reasoning_effort: Option<&str>) -> bool {
+    let Some(effort) = reasoning_effort.map(str::trim) else {
+        return false;
+    };
+
+    if effort.is_empty() {
+        return false;
+    }
+
+    !matches!(effort, "off" | "none" | "disabled" | "false")
+}
+
+fn deepseek_model_capabilities(model_id: &str) -> Option<ModelCapabilities> {
+    if model_id == "deepseek-chat" || model_id == "deepseek-r1" {
+        return Some(ModelCapabilities {
+            reasoning: true,
+            reasoning_effort: true,
+            reasoning_effort_levels: vec!["off", "low", "medium", "high"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        });
+    }
+
+    None
+}
+
 // ---------------------------------------------------------------------------
 // DeepSeek provider implementation
 // ---------------------------------------------------------------------------
@@ -211,14 +238,15 @@ impl Provider for DeepSeekProvider {
                     name: c.name.unwrap_or_else(|| format!("DeepSeek {}", c.model_type)),
                     provider: "deepseek".into(),
                     provider_model: None,
+                    capabilities: deepseek_model_capabilities(&format!("deepseek-{}", c.model_type)),
                 })
                 .collect());
         }
 
         // Fallback
         Ok(vec![
-            ModelInfo { id: "deepseek-chat".into(), name: "DeepSeek Chat (default)".into(), provider: "deepseek".into(), provider_model: None },
-            ModelInfo { id: "deepseek-r1".into(), name: "DeepSeek R1".into(), provider: "deepseek".into(), provider_model: None },
+            ModelInfo { id: "deepseek-chat".into(), name: "DeepSeek Chat (default)".into(), provider: "deepseek".into(), provider_model: None, capabilities: deepseek_model_capabilities("deepseek-chat") },
+            ModelInfo { id: "deepseek-r1".into(), name: "DeepSeek R1".into(), provider: "deepseek".into(), provider_model: None, capabilities: deepseek_model_capabilities("deepseek-r1") },
         ])
     }
 
@@ -332,7 +360,7 @@ impl Provider for DeepSeekProvider {
             "model_type": model_type,
             "prompt": prompt,
             "ref_file_ids": [],
-            "thinking_enabled": false,
+            "thinking_enabled": thinking_enabled_for_reasoning_effort(options.reasoning_effort.as_deref()),
             "search_enabled": false,
             "preempt": false,
         });
@@ -369,6 +397,25 @@ impl Provider for DeepSeekProvider {
             stream: stream_deepseek_chunks(res),
             conversation_id: Some(session_id),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::thinking_enabled_for_reasoning_effort;
+
+    #[test]
+    fn deepseek_thinking_is_disabled_when_reasoning_is_off() {
+        assert!(!thinking_enabled_for_reasoning_effort(Some("off")));
+        assert!(!thinking_enabled_for_reasoning_effort(Some("none")));
+        assert!(!thinking_enabled_for_reasoning_effort(None));
+    }
+
+    #[test]
+    fn deepseek_thinking_is_enabled_for_non_off_values() {
+        assert!(thinking_enabled_for_reasoning_effort(Some("low")));
+        assert!(thinking_enabled_for_reasoning_effort(Some("high")));
+        assert!(thinking_enabled_for_reasoning_effort(Some("max")));
     }
 }
 
@@ -552,4 +599,3 @@ fn extract_text_from_event(obj: &serde_json::Map<String, serde_json::Value>, res
 
     EventResult { text: None, thinking: None, response_started }
 }
-

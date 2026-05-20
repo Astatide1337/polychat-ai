@@ -22,6 +22,8 @@ pub struct ChatMessage {
 pub struct ChatOptions {
  #[allow(dead_code)] pub temperature: Option<f32>,
  #[allow(dead_code)] pub max_tokens: Option<u32>,
+ #[allow(dead_code)] pub reasoning_effort: Option<String>,
+    pub stream: bool,
     pub stop: Vec<String>,
     /// Native OpenAI-format tool definitions. When non-empty, the provider
     /// should pass them directly in the request body (for providers that
@@ -53,6 +55,18 @@ pub struct ModelInfo {
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub reasoning: bool,
+    #[serde(default)]
+    pub reasoning_effort: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_effort_levels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
