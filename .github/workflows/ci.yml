@@ -112,7 +112,6 @@ jobs:
         with:
           node-version: 22.14.0
           cache: npm
-          registry-url: https://registry.npmjs.org
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
