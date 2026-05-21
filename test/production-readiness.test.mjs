@@ -72,6 +72,7 @@ describe("Production readiness", () => {
     assert.match(ci, /cargo test --bin polychat-server/);
     assert.match(ci, /cargo build --release/);
     assert.match(ci, /npm pack --dry-run/);
+    assert.match(ci, /environment: npm-publish/);
     assert.match(ci, /id-token: write/);
     assert.match(ci, /npm publish --provenance --access public/);
   });
