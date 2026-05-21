@@ -73,7 +73,7 @@ describe("Production readiness", () => {
     assert.match(ci, /cargo build --release/);
     assert.match(ci, /npm pack --dry-run/);
     assert.match(ci, /id-token: write/);
-    assert.match(ci, /NODE_AUTH_TOKEN/);
+    assert.match(ci, /npm publish --provenance --access public/);
   });
 
   it("README documents quickstart security providers and OpenAI usage", () => {
