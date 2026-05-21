@@ -1,6 +1,6 @@
 {
   "name": "polychat-ai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-hosted browser-backed AI CLI and local OpenAI-compatible API server.",
   "license": "MIT",
   "type": "module",
