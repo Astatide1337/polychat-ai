@@ -27,6 +27,8 @@ export interface PolychatConfig {
     defaultModel: string;
     connected: boolean;
     lastValidated: string | null;
+    /** When true, all completions for this provider default to temporary chat (not saved to provider history). */
+    temporary?: boolean;
   }>;
 }
 

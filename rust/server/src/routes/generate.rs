@@ -9,6 +9,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::config::PolychatConfig;
 use crate::providers::{ChatChunk, ChatMessage, ChatOptions};
 use crate::routes::errors::RouteError;
 use crate::routes::resolver::{Providers, find_provider_for_model};
@@ -21,6 +22,8 @@ pub struct GenerateRequest {
     pub system: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub temporary: bool,
     pub options: Option<GenerateOptions>,
 }
 
@@ -33,6 +36,7 @@ pub struct GenerateOptions {
 pub async fn generate_handler(
     Json(body): Json<GenerateRequest>,
     providers: Providers,
+    config: std::sync::Arc<PolychatConfig>,
 ) -> impl IntoResponse {
     let mut messages = Vec::new();
     if let Some(system) = &body.system {
@@ -48,18 +52,8 @@ pub async fn generate_handler(
         tool_call_id: None,
     });
 
-    let options = ChatOptions {
-        temperature: body.options.as_ref().and_then(|o| o.temperature),
-        max_tokens: body.options.as_ref().and_then(|o| o.num_predict),
-        reasoning_effort: None,
-        stream: body.stream,
-        stop: vec![],
-        tools: Vec::new(),
-        tool_choice: None,
-    };
-
-    let provider = match find_provider_for_model(&body.model, &providers, 15).await {
-        Some((provider, _provider_id)) => provider,
+    let (provider, provider_id) = match find_provider_for_model(&body.model, &providers, 15).await {
+        Some((provider, provider_id)) => (provider, provider_id),
         None => {
             return RouteError::new(
                 StatusCode::NOT_FOUND,
@@ -68,6 +62,21 @@ pub async fn generate_handler(
                 "model_not_found",
             ).into_response();
         }
+    };
+
+    let config_temporary = config.providers.get(&provider_id)
+        .map(|pc| pc.temporary)
+        .unwrap_or(false);
+
+    let options = ChatOptions {
+        temperature: body.options.as_ref().and_then(|o| o.temperature),
+        max_tokens: body.options.as_ref().and_then(|o| o.num_predict),
+        reasoning_effort: None,
+        stream: body.stream,
+        stop: vec![],
+        tools: Vec::new(),
+        tool_choice: None,
+        temporary: body.temporary || config_temporary,
     };
 
     let provider_response = match provider.send_message(&messages, &body.model, &options, None).await {
@@ -153,4 +162,74 @@ async fn non_stream_ollama_response(
         "done": true,
         "done_reason": "stop",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GenerateRequest;
+    use crate::config::{PolychatConfig, ProviderConfig, ServerConfig};
+    use std::collections::HashMap;
+
+    fn resolve_temporary(request_temporary: bool, provider_id: &str, config: &PolychatConfig) -> bool {
+        let config_temporary = config.providers.get(provider_id)
+            .map(|pc| pc.temporary)
+            .unwrap_or(false);
+        request_temporary || config_temporary
+    }
+
+    fn sample_config(chatgpt_temporary: bool) -> PolychatConfig {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "chatgpt".into(),
+            ProviderConfig {
+                default_model: "gpt-5-5-instant".into(),
+                connected: true,
+                last_validated: None,
+                temporary: chatgpt_temporary,
+            },
+        );
+
+        PolychatConfig {
+            default_model: "gpt-5-5-instant".into(),
+            server: ServerConfig {
+                port: 1443,
+                host: "127.0.0.1".into(),
+            },
+            session_salt: "test-salt".into(),
+            providers,
+        }
+    }
+
+    #[test]
+    fn generate_request_temporary_defaults_to_false() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-5-5-instant",
+            "prompt": "hello"
+        })).expect("request should deserialize");
+
+        assert!(!request.temporary);
+    }
+
+    #[test]
+    fn generate_request_temporary_deserializes_true() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-5-5-instant",
+            "prompt": "hello",
+            "temporary": true
+        })).expect("request should deserialize");
+
+        assert!(request.temporary);
+    }
+
+    #[test]
+    fn generate_temporary_uses_provider_default() {
+        let config = sample_config(true);
+        assert!(resolve_temporary(false, "chatgpt", &config));
+    }
+
+    #[test]
+    fn generate_temporary_request_overrides_missing_provider_default() {
+        let config = sample_config(false);
+        assert!(resolve_temporary(true, "chatgpt", &config));
+    }
 }

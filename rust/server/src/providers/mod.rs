@@ -20,9 +20,9 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
- #[allow(dead_code)] pub temperature: Option<f32>,
- #[allow(dead_code)] pub max_tokens: Option<u32>,
- #[allow(dead_code)] pub reasoning_effort: Option<String>,
+    #[allow(dead_code)] pub temperature: Option<f32>,
+    #[allow(dead_code)] pub max_tokens: Option<u32>,
+    #[allow(dead_code)] pub reasoning_effort: Option<String>,
     pub stream: bool,
     pub stop: Vec<String>,
     /// Native OpenAI-format tool definitions. When non-empty, the provider
@@ -32,6 +32,12 @@ pub struct ChatOptions {
     /// Native tool_choice — passed through for providers that support native
     /// tool calling.
     pub tool_choice: Option<serde_json::Value>,
+    /// When true, the conversation should not be saved to the provider's
+    /// history. Supported by: ChatGPT (`history_and_training_disabled`),
+    /// Claude (`is_temporary`), DeepSeek (`is_temp`), Gemini
+    /// (`inner_req_list[45] = 1`). Ignored by providers that do not
+    /// support temporary chat (Kimi).
+    pub temporary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +86,8 @@ pub struct ProviderConversation {
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_debug: Option<serde_json::Value>,
 }
 pub type ChunkStream = Pin<Box<dyn Stream<Item = anyhow::Result<ChatChunk>> + Send>>;
 

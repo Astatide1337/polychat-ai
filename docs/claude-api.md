@@ -51,3 +51,7 @@ The stream ends on Claude's stop event rather than a literal `[DONE]` from upstr
 ## Tool Calling
 
 Claude web does not expose native custom tool definitions to Polychat, so Polychat uses emulated tool calling and returns normal OpenAI-style `tool_calls` to clients.
+
+## Temporary Chat
+
+When `temporary: true` is set on a completion request (or the provider's `temporary` config default is `true`), Polychat includes `"is_temporary": true` in the create-conversation request body (`POST /api/organizations/{org_id}/chat_conversations`). This tells Claude not to persist the conversation in the user's history.

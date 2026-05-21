@@ -82,8 +82,8 @@ impl ClaudeProvider {
     pub fn new() -> Self {
         ClaudeProvider {
             client: reqwest::Client::builder()
-                            .connect_timeout(std::time::Duration::from_secs(10))
-                            .build()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
                 .expect("building reqwest client"),
         }
     }
@@ -119,6 +119,46 @@ impl ClaudeProvider {
             .to_string();
 
         Ok(auth)
+    }
+
+    async fn create_conversation_with_temporary(&self, model: &str, temporary: bool) -> anyhow::Result<ProviderConversation> {
+        let auth = self.get_auth().await?;
+        let conversation_id = Uuid::new_v4().to_string();
+
+        let mut headers = build_claude_headers(&auth.cookie_header);
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        let mut body = serde_json::json!({
+            "name": "",
+            "model": model,
+            "uuid": conversation_id,
+        });
+        if temporary {
+            body["is_temporary"] = Value::from(true);
+        }
+
+        let res = self.client
+            .post(&format!("https://claude.ai/api/organizations/{}/chat_conversations", auth.org_id))
+            .headers(headers)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .context("creating Claude conversation")?;
+
+        if !res.status().is_success() {
+            bail!("Failed to create Claude conversation: {}", res.status());
+        }
+
+        Ok(ProviderConversation {
+            id: conversation_id.clone(),
+            provider: "claude".into(),
+            title: "New conversation".into(),
+            model_id: Some(model.to_string()),
+            updated_at: None,
+            url: Some(format!("https://claude.ai/chat/{}", conversation_id)),
+            provider_debug: None,
+        })
     }
 }
 
@@ -184,50 +224,21 @@ impl Provider for ClaudeProvider {
                 model_id: item.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 updated_at: item.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 url: None,
+                provider_debug: None,
             });
         }
         Ok(convos)
     }
 
     async fn create_conversation(&self, model: &str) -> anyhow::Result<ProviderConversation> {
-        let auth = self.get_auth().await?;
-        let conversation_id = Uuid::new_v4().to_string();
-
-        let mut headers = build_claude_headers(&auth.cookie_header);
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        let res = self.client
-            .post(&format!("https://claude.ai/api/organizations/{}/chat_conversations", auth.org_id))
-            .headers(headers)
-            .json(&serde_json::json!({
-                "name": "",
-                "model": model,
-                "uuid": conversation_id,
-            }))
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .context("creating Claude conversation")?;
-
-        if !res.status().is_success() {
-            bail!("Failed to create Claude conversation: {}", res.status());
-        }
-
-        Ok(ProviderConversation {
-            id: conversation_id.clone(),
-            provider: "claude".into(),
-            title: "New conversation".into(),
-            model_id: Some(model.to_string()),
-            updated_at: None,
-            url: Some(format!("https://claude.ai/chat/{}", conversation_id)),
-        })
+        self.create_conversation_with_temporary(model, false).await
     }
 
     async fn send_message(
         &self,
         messages: &[ChatMessage],
         model: &str,
-        _options: &ChatOptions,
+        options: &ChatOptions,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<ProviderResponse> {
         let auth = self.get_auth().await?;
@@ -235,7 +246,7 @@ impl Provider for ClaudeProvider {
         let conv_id = if let Some(id) = conversation_id {
             id.to_string()
         } else {
-            self.create_conversation(model).await?.id
+            self.create_conversation_with_temporary(model, options.temporary).await?.id
         };
 
         let prompt = format_prompt(messages);

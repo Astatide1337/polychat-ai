@@ -21,6 +21,10 @@ pub struct ProviderConfig {
     pub connected: bool,
     #[serde(default)]
     pub last_validated: Option<String>,
+    /// When true, all completions for this provider default to temporary chat
+    /// (not saved to provider history). Can be overridden per-request.
+    #[serde(default)]
+    pub temporary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +190,7 @@ fn normalize_config(config: &mut PolychatConfig) -> bool {
                         default_model: (*default_model).to_string(),
                         connected: false,
                         last_validated: None,
+                        temporary: false,
                     },
                 );
                 changed = true;
@@ -218,6 +223,7 @@ fn default_config() -> PolychatConfig {
                 default_model: default_model.to_string(),
                 connected: false,
                 last_validated: None,
+                temporary: false,
             },
         );
     }

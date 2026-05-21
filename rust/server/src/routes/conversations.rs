@@ -73,6 +73,7 @@ pub async fn list_conversations_handler(
                     "modelId": c.model_id,
                     "updatedAt": c.updated_at,
                     "url": c.url,
+                    "providerDebug": c.provider_debug,
                 })
             }).collect();
             (StatusCode::OK, Json(json!({
@@ -125,6 +126,7 @@ pub async fn create_conversation_handler(
                     "title": conversation.title,
                     "modelId": conversation.model_id,
                     "url": conversation.url,
+                    "providerDebug": conversation.provider_debug,
                 }
             })))
         }

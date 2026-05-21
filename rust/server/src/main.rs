@@ -108,7 +108,8 @@ async fn main() {
     }
 
     let providers = Arc::new(provider_map);
-    let app = router::build_router(providers);
+    let config = Arc::new(config);
+    let app = router::build_router(providers, config);
 
     let addr = format!("{}:{}", host, port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {

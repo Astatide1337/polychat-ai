@@ -117,6 +117,8 @@ Polychat accepts OpenAI-style chat completion requests and adds a few Polychat-s
 - `tools`: optional function tool definitions
 - `tool_choice`: optional OpenAI-style tool choice
 - `provider_conversation_id`: optional existing provider conversation id
+- `temporary`: optional boolean — when `true`, Polychat requests the provider's temporary / do-not-remember mode when supported. For ChatGPT, Polychat also forces stateless turns: it does not reuse `provider_conversation_id`, does not consult/store the conversation tracker, and instead replays recent message history in each request so you keep context without binding to a provider-side thread. Claude uses `is_temporary`, DeepSeek uses `is_temp`, Gemini uses `inner_req_list[45] = 1`, and Kimi ignores it. Can also be set as a per-provider default in `~/.polychat/config.json` via the `temporary` field; the request-level flag is OR'd with the config default.
+- `include_provider_debug`: optional boolean for non-streaming requests — when `true`, Polychat adds a `provider_debug` object to the response with lightweight tracing fields such as the resolved provider, whether temporary mode was requested, how the conversation id was chosen (`new`, `tracked`, or `provided`), and the provider-side conversation id when available.
 
 ### Non-streaming Example
 
@@ -157,6 +159,30 @@ Example response:
 }
 ```
 
+Debug example:
+
+```json
+{
+  "id": "chatcmpl-uuid",
+  "object": "chat.completion",
+  "created": 1735689600,
+  "model": "gpt-5-5",
+  "choices": [],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  },
+  "provider_debug": {
+    "provider": "chatgpt",
+    "requested_temporary": true,
+    "conversation_source": "temporary_stateless",
+    "input_conversation_id": null,
+    "provider_conversation_id": "6a0e3a18-aba8-83ea-9be3-f0eb45ead856"
+  }
+}
+```
+
 ### Streaming Example
 
 ```bash
@@ -172,6 +198,8 @@ curl -N http://127.0.0.1:1443/v1/chat/completions \
 ```
 
 Streaming responses use standard OpenAI-style SSE chunks ending in `data: [DONE]`.
+
+`include_provider_debug` is only attached to non-streaming completion responses.
 
 ### Tool Calling
 
@@ -191,6 +219,8 @@ Clients should send follow-up turns in standard OpenAI format, including:
 - the next user message
 
 Polychat preserves these turns when continuing provider conversations.
+
+Conversation items returned by `GET /v1/conversations` may also include an optional `providerDebug` object when a provider exposes useful native metadata. For ChatGPT, this includes temporary-chat markers like `is_temporary_chat`, `is_do_not_remember`, and `memory_scope` when they are present in ChatGPT's list payload.
 
 ### Tool Call Example
 
@@ -287,3 +317,6 @@ Deletes a stored provider session.
 Polychat also exposes an Ollama-style generate endpoint for simple text generation flows.
 
 Use this when an Ollama-compatible client expects `/api/generate` instead of `/v1/chat/completions`.
+
+- `temporary`: optional boolean — same semantics as `/v1/chat/completions`. If omitted, Polychat still applies the provider's configured temporary default from `~/.polychat/config.json`.
+- For ChatGPT, that means `/api/generate` now also honors stateless temporary mode, so Ollama-style clients do not accidentally create saved chats when ChatGPT temporary mode is enabled in config.

@@ -132,9 +132,10 @@ fn shared_prefix_suffix_len(text: &str, pattern: &str) -> usize {
 
 pub fn build_emulated_tool_prompt(tools: &[Value], tool_choice: Option<&Value>) -> String {
     let mut prompt = String::from(
-        "You have access to tools, but tools are optional unless they are clearly necessary or explicitly required. Respond with exactly one block and no other text.\n\n\
-Prefer a direct `<polychat_final>` answer when you can make useful progress from the conversation alone. This includes asking a clarifying question, proposing a plan, summarizing, or reasoning about the user's request without touching files or running commands.\n\n\
-Use a `<polychat_tool_call>` only when a tool will materially improve the answer or the user explicitly asked for that tool action. Do not call tools just because they exist. Do not write files, inspect the filesystem, or run commands unless the task truly needs it right now.\n\n\
+        "You have access to tools. Use them confidently whenever they help you answer the user's request accurately, especially for local repo, filesystem, cwd, environment, command-output, or other inspectable runtime facts. Respond with exactly one block and no other text.\n\n\
+Prefer acting with an available safe tool over asking the user for permission. If a read-only or non-destructive tool can answer the question, use it directly instead of asking whether you may inspect files, list directories, read config, or check command output.\n\n\
+Prefer a direct `<polychat_final>` answer only when you can already answer accurately from the transcript alone or when the user is explicitly asking for planning, scoping, brainstorming, or clarification that does not depend on fresh tool results. Do not guess inspectable facts.\n\n\
+Use a `<polychat_tool_call>` when a tool will materially improve the answer or avoid guessing. Do not ask for permission to use an available tool unless the next action would be destructive, irreversible, security-sensitive, or would change external state.\n\n\
 If you can answer directly, respond with:\n\
 <polychat_final>\n\
 your final user-facing answer\n\
@@ -155,6 +156,8 @@ Rules:\n\
 - If the user already provided a tool result, use it to continue and either answer or call one next tool.\n\
 - Never pretend a tool was run if it was not.\n\
 - If the answer depends on the current filesystem, current working directory, environment, command output, external state, or any information not present in the transcript, call a tool instead of guessing.\n\
+- Do not ask the user whether you should use an available safe tool; use it.\n\
+- After receiving enough tool results, answer directly and stop.\n\
 - If the user is asking for planning, scoping, brainstorming, or clarification, prefer `<polychat_final>` and continue the conversation naturally unless a tool is genuinely needed.\n\n\
 Available tools:",
     );
@@ -354,6 +357,10 @@ pub fn build_repair_prompt_with_context(
     let mut prompt = format!(
         "Your previous response was invalid: {}\nReturn exactly one corrected `<polychat_tool_call>` or `<polychat_final>` block and nothing else.\nUse the canonical tool-call shape only:\n<polychat_tool_call>\n{{\"name\":\"<tool_name>\",\"arguments\":{{}}}}\n</polychat_tool_call>",
         error
+    );
+
+    prompt.push_str(
+        "\nIf an available safe tool can answer the user's question, use it directly instead of asking for permission.",
     );
 
     if !allowed_tools.is_empty() {

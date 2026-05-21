@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use futures::StreamExt;
 use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::providers::{ChatChunk, ChunkStream};
@@ -17,6 +18,8 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_debug: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +70,7 @@ fn completion_response(
     model: &str,
     message: AssistantMessage,
     finish_reason: &'static str,
+    provider_debug: Option<Value>,
 ) -> ChatCompletionResponse {
     ChatCompletionResponse {
         id: request_id.to_string(),
@@ -79,6 +83,7 @@ fn completion_response(
             finish_reason,
         }],
         usage: usage(),
+        provider_debug,
     }
 }
 
@@ -146,6 +151,7 @@ pub fn text_completion_response(request_id: &str, model: &str, content: String) 
             tool_calls: None,
         },
         "stop",
+        None,
     )
 }
 
@@ -159,10 +165,17 @@ pub fn tool_call_completion_response(request_id: &str, model: &str, name: String
             tool_calls: Some(vec![tool_call(name, arguments)]),
         },
         "tool_calls",
+        None,
     )
 }
 
-pub async fn non_stream_response(mut chunk_stream: ChunkStream, request_id: &str, model: &str, has_tools: bool) -> Json<ChatCompletionResponse> {
+pub async fn non_stream_response(
+    mut chunk_stream: ChunkStream,
+    request_id: &str,
+    model: &str,
+    has_tools: bool,
+    provider_debug: Option<Value>,
+) -> Json<ChatCompletionResponse> {
     let mut full_content = String::new();
     let mut parser = if has_tools { Some(ToolCallParser::new()) } else { None };
     let mut tool_calls = Vec::new();
@@ -198,7 +211,17 @@ pub async fn non_stream_response(mut chunk_stream: ChunkStream, request_id: &str
     }
 
     if tool_calls.is_empty() {
-        Json(text_completion_response(request_id, model, full_content))
+        Json(completion_response(
+            request_id,
+            model,
+            AssistantMessage {
+                role: "assistant",
+                content: Some(full_content),
+                tool_calls: None,
+            },
+            "stop",
+            provider_debug,
+        ))
     } else {
         Json(completion_response(
             request_id,
@@ -209,6 +232,7 @@ pub async fn non_stream_response(mut chunk_stream: ChunkStream, request_id: &str
                 tool_calls: Some(tool_calls),
             },
             "tool_calls",
+            provider_debug,
         ))
     }
 }
@@ -381,7 +405,7 @@ pub fn format_sse_chunk(id: &str, model: &str, delta: StreamDelta, finish_reason
 #[cfg(test)]
 mod tests {
     use super::{format_sse_chunk, text_completion_response, tool_call_completion_response, StreamDelta, StreamFunctionDelta, StreamToolCallDelta};
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     #[test]
     fn tool_call_completion_response_has_expected_shape() {
@@ -399,6 +423,16 @@ mod tests {
         assert_eq!(value["choices"][0]["finish_reason"], "stop");
         assert_eq!(value["choices"][0]["message"]["content"], "ok");
         assert_eq!(value["choices"][0]["message"]["tool_calls"], Value::Null);
+        assert_eq!(value["provider_debug"], Value::Null);
+    }
+
+    #[test]
+    fn completion_response_serializes_provider_debug_when_present() {
+        let mut response = text_completion_response("chatcmpl-1", "claude-sonnet-4-6", "ok".into());
+        response.provider_debug = Some(json!({"provider": "chatgpt", "requested_temporary": true}));
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["provider_debug"]["provider"], "chatgpt");
+        assert_eq!(value["provider_debug"]["requested_temporary"], true);
     }
 
     #[test]

@@ -9,10 +9,11 @@ use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::auth::auth_middleware;
+use crate::config::PolychatConfig;
 use crate::providers::Provider;
 use crate::routes::*;
 
-pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>) -> Router {
+pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>, config: Arc<PolychatConfig>) -> Router {
     let p_health = providers.clone();
     let p_models = providers.clone();
     let p_models_get = providers.clone();
@@ -20,6 +21,8 @@ pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>) -> Route
     let p_conversations = providers.clone();
     let p_create_convo = providers.clone();
     let p_generate = providers.clone();
+    let c_completions = config.clone();
+    let c_generate = config.clone();
 
     Router::new()
         .route("/health", get(move || health::health_handler(p_health.clone())))
@@ -32,7 +35,8 @@ pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>) -> Route
         ))
         .route("/v1/chat/completions", post(move |body: axum::Json<completions::CompletionRequest>| {
             let p = p_completions.clone();
-            async move { completions::completions_handler(body, p).await }
+            let c = c_completions.clone();
+            async move { completions::completions_handler(body, p, c).await }
         }))
         .route("/v1/conversations", get(move |query: axum::extract::Query<conversations::ConversationsQuery>| {
             let p = p_conversations.clone();
@@ -46,7 +50,8 @@ pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>) -> Route
         .route("/v1/sessions/{provider}", delete(sessions::delete_session_handler))
         .route("/api/generate", post(move |body: axum::Json<generate::GenerateRequest>| {
             let p = p_generate.clone();
-            async move { generate::generate_handler(body, p).await }
+            let c = c_generate.clone();
+            async move { generate::generate_handler(body, p, c).await }
         }))
         .layer(axum::middleware::from_fn(auth_middleware))
         .layer(TimeoutLayer::new(Duration::from_secs(120)))

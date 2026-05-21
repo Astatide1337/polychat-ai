@@ -19,6 +19,83 @@ use crate::tools::emulated::{
     build_repair_prompt_with_context, parse_emulated_tool_response, validate_emulated_tool_call,
 };
 
+fn should_store_emulated_tracker(temporary: bool) -> bool {
+    !temporary
+}
+
+fn next_emulated_conversation_id(
+    temporary: bool,
+    current: Option<String>,
+    provider_returned: Option<String>,
+) -> Option<String> {
+    if temporary {
+        None
+    } else {
+        provider_returned.or(current)
+    }
+}
+
+fn normalize_tool_arguments(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| arguments.trim().to_string())
+}
+
+fn parse_rendered_tool_call(content: &str) -> Option<(String, String, String)> {
+    let line = content
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("Tool call "))?
+        .trim();
+
+    let rest = line.strip_prefix("Tool call ")?;
+    let (call_id, remainder) = rest.split_once(": ")?;
+    let open = remainder.find('(')?;
+    let close = remainder.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+
+    Some((
+        call_id.to_string(),
+        remainder[..open].to_string(),
+        normalize_tool_arguments(&remainder[open + 1..close]),
+    ))
+}
+
+fn latest_completed_tool_call(messages: &[ChatMessage]) -> Option<(String, String, String)> {
+    let latest_tool = messages.iter().rev().find(|msg| msg.role == "tool")?;
+    let tool_call_id = latest_tool.tool_call_id.as_deref()?;
+
+    messages
+        .iter()
+        .rev()
+        .filter(|msg| msg.role == "assistant")
+        .find_map(|msg| parse_rendered_tool_call(&msg.content))
+        .filter(|(call_id, _, _)| call_id == tool_call_id)
+}
+
+fn is_exact_consecutive_duplicate_tool_call(
+    messages: &[ChatMessage],
+    name: &str,
+    arguments: &str,
+) -> bool {
+    latest_completed_tool_call(messages)
+        .map(|(_, previous_name, previous_arguments)| {
+            previous_name == name
+                && previous_arguments == normalize_tool_arguments(arguments)
+        })
+        .unwrap_or(false)
+}
+
+fn duplicate_tool_call_error(name: &str, arguments: &str) -> String {
+    format!(
+        "the model repeated the exact same consecutive tool call `{}` with arguments `{}` even though the previous result is already available; reuse that result, choose a different tool call, or answer directly",
+        name,
+        normalize_tool_arguments(arguments)
+    )
+}
+
 fn format_tool_result_message(tool_call_id: Option<&str>, content: &str) -> String {
     let call_id = tool_call_id.unwrap_or("unknown");
     format!("[tool_result]\ncall_id: {}\ncontent:\n{}", call_id, content)
@@ -95,6 +172,94 @@ fn final_answer_contains_inline_tool_call_json(content: &str) -> bool {
         || (lower.contains("<polychat_tool_call>") && !lower.contains("</polychat_tool_call>"))
 }
 
+fn normalize_validation_text(content: &str) -> String {
+    content
+        .to_lowercase()
+        .replace(['’', '`'], "'")
+        .replace("\u{201c}", "\"")
+        .replace("\u{201d}", "\"")
+}
+
+fn has_any_tool(tools: &[Value]) -> bool {
+    tools.iter().any(|tool| tool.get("function").is_some())
+}
+
+fn final_answer_seeks_permission_for_safe_tool_use(content_lower: &str, tools: &[Value]) -> bool {
+    if !has_any_tool(tools) {
+        return false;
+    }
+
+    let asks_permission = [
+        "can you confirm if i should",
+        "can i proceed",
+        "should i read",
+        "should i inspect",
+        "should i check",
+        "should i look at",
+        "should i use the read tool",
+        "should i use the grep tool",
+        "should i use the glob tool",
+        "do you want me to do that",
+        "if you want, i can",
+        "i can instead read",
+    ]
+    .iter()
+    .any(|phrase| content_lower.contains(phrase));
+
+    if !asks_permission {
+        return false;
+    }
+
+    [
+        "read",
+        "inspect",
+        "check",
+        "look at",
+        "package.json",
+        "directory",
+        "repo",
+        "files",
+        "src/commands",
+    ]
+    .iter()
+    .any(|hint| content_lower.contains(hint))
+}
+
+fn final_answer_requests_user_supplied_local_inputs(content_lower: &str, tools: &[Value]) -> bool {
+    if !has_any_tool(tools) {
+        return false;
+    }
+
+    let asks_user_to_supply = [
+        "could you share",
+        "you can provide",
+        "provide the 'package.json'",
+        "provide the package.json",
+        "copy-paste the 'package.json'",
+        "copy-paste the package.json",
+        "you'll need to provide access",
+        "you will need to provide access",
+        "provide a listing of",
+    ]
+    .iter()
+    .any(|phrase| content_lower.contains(phrase));
+
+    if !asks_user_to_supply {
+        return false;
+    }
+
+    [
+        "package.json",
+        "src/commands",
+        "listing",
+        "repo",
+        "files",
+        "directory",
+    ]
+    .iter()
+    .any(|hint| content_lower.contains(hint))
+}
+
 pub async fn emulated_completion_response(
     body: &CompletionRequest,
     provider: Arc<dyn Provider>,
@@ -127,8 +292,10 @@ pub async fn emulated_completion_response(
             content,
             conversation_id,
         }) => {
-            if let Some(cid) = conversation_id {
+            if should_store_emulated_tracker(body.temporary) {
+                if let Some(cid) = conversation_id {
                 TRACKER.store(&provider_messages, &provider_id, cid);
+                }
             }
 
             if body.stream {
@@ -142,8 +309,10 @@ pub async fn emulated_completion_response(
             arguments,
             conversation_id,
         }) => {
-            if let Some(cid) = conversation_id {
+            if should_store_emulated_tracker(body.temporary) {
+                if let Some(cid) = conversation_id {
                 TRACKER.store(&provider_messages, &provider_id, cid);
+                }
             }
 
             if body.stream {
@@ -187,8 +356,10 @@ fn stream_emulated_completion_response(
                 conversation_id,
                 streamed,
             }) => {
-                if let Some(cid) = conversation_id {
+                if should_store_emulated_tracker(body.temporary) {
+                    if let Some(cid) = conversation_id {
                     TRACKER.store(&provider_messages, &provider_id, cid);
+                    }
                 }
 
                 if !streamed && !content.is_empty() {
@@ -220,8 +391,10 @@ fn stream_emulated_completion_response(
                 arguments,
                 conversation_id,
             }) => {
-                if let Some(cid) = conversation_id {
+                if should_store_emulated_tracker(body.temporary) {
+                    if let Some(cid) = conversation_id {
                     TRACKER.store(&provider_messages, &provider_id, cid);
+                    }
                 }
 
                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
@@ -340,15 +513,16 @@ async fn run_emulated_completion(
             .send_message(
                 &working_messages,
                 &body.model,
-                &ChatOptions {
-                    temperature: body.temperature,
-                    max_tokens: body.max_tokens,
-                    reasoning_effort: body.reasoning_effort.clone(),
-                    stream: body.stream,
-                    stop: body.stop.clone(),
-                    tools: Vec::new(),
-                    tool_choice: None,
-                },
+        &ChatOptions {
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+            reasoning_effort: body.reasoning_effort.clone(),
+            stream: body.stream,
+            stop: body.stop.clone(),
+            tools: Vec::new(),
+            tool_choice: None,
+            temporary: body.temporary,
+        },
                 conversation_id.as_deref(),
             )
             .await
@@ -359,9 +533,11 @@ async fn run_emulated_completion(
                 code: "upstream_error",
             })?;
 
-        if let Some(cid) = provider_response.conversation_id.clone() {
-            conversation_id = Some(cid);
-        }
+        conversation_id = next_emulated_conversation_id(
+            body.temporary,
+            conversation_id,
+            provider_response.conversation_id.clone(),
+        );
 
         let raw_output = collect_provider_text(provider_response.stream).await;
 
@@ -428,6 +604,34 @@ async fn run_emulated_completion(
                     body.tool_choice.as_ref(),
                 ) {
                     Ok(()) => {
+                        if is_exact_consecutive_duplicate_tool_call(
+                            &provider_messages,
+                            &resolved_name,
+                            &arguments,
+                        ) {
+                            let err = duplicate_tool_call_error(&resolved_name, &arguments);
+                            if attempt < 2 {
+                                append_repair_turn(
+                                    &mut working_messages,
+                                    raw_output,
+                                    &err,
+                                    &tools,
+                                    body.tool_choice.as_ref(),
+                                );
+                                continue;
+                            }
+
+                            return Err(RouteError {
+                                status: StatusCode::BAD_GATEWAY,
+                                message: format!(
+                                    "{} emulated tool call validation failed after retries: {}",
+                                    provider_id, err
+                                ),
+                                err_type: "upstream_error",
+                                code: "tool_call_invalid",
+                            });
+                        }
+
                         return Ok(EmulatedCompletionOutcome::ToolCall {
                             name: resolved_name,
                             arguments,
@@ -555,15 +759,16 @@ async fn run_emulated_completion_streaming(
             .send_message(
                 &working_messages,
                 &body.model,
-                &ChatOptions {
-                    temperature: body.temperature,
-                    max_tokens: body.max_tokens,
-                    reasoning_effort: body.reasoning_effort.clone(),
-                    stream: body.stream,
-                    stop: body.stop.clone(),
-                    tools: Vec::new(),
-                    tool_choice: None,
-                },
+        &ChatOptions {
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+            reasoning_effort: body.reasoning_effort.clone(),
+            stream: body.stream,
+            stop: body.stop.clone(),
+            tools: Vec::new(),
+            tool_choice: None,
+            temporary: body.temporary,
+        },
                 conversation_id.as_deref(),
             )
             .await
@@ -574,9 +779,11 @@ async fn run_emulated_completion_streaming(
                 code: "upstream_error",
             })?;
 
-        if let Some(cid) = provider_response.conversation_id.clone() {
-            conversation_id = Some(cid);
-        }
+        conversation_id = next_emulated_conversation_id(
+            body.temporary,
+            conversation_id,
+            provider_response.conversation_id.clone(),
+        );
 
         let (raw_output, streamed_any) = stream_provider_text(
             provider_response.stream,
@@ -645,6 +852,34 @@ async fn run_emulated_completion_streaming(
                     body.tool_choice.as_ref(),
                 ) {
                     Ok(()) => {
+                        if is_exact_consecutive_duplicate_tool_call(
+                            &provider_messages,
+                            &resolved_name,
+                            &arguments,
+                        ) {
+                            let err = duplicate_tool_call_error(&resolved_name, &arguments);
+                            if !streamed_any && attempt < 2 {
+                                append_repair_turn(
+                                    &mut working_messages,
+                                    raw_output,
+                                    &err,
+                                    &tools,
+                                    body.tool_choice.as_ref(),
+                                );
+                                continue;
+                            }
+
+                            return Err(RouteError {
+                                status: StatusCode::BAD_GATEWAY,
+                                message: format!(
+                                    "{} emulated tool call validation failed after retries: {}",
+                                    provider_id, err
+                                ),
+                                err_type: "upstream_error",
+                                code: "tool_call_invalid",
+                            });
+                        }
+
                         return Ok(EmulatedStreamOutcome::ToolCall {
                             name: resolved_name,
                             arguments,
@@ -902,9 +1137,11 @@ fn final_answer_requires_tool_retry(
         _ => {}
     }
 
-    let content_lower = content.to_lowercase();
+    let content_lower = normalize_validation_text(content);
     if content_lower.contains("don't have access")
         || content_lower.contains("do not have access")
+        || content_lower.contains("don't have permission")
+        || content_lower.contains("do not have permission")
         || content_lower.contains("cannot run")
         || content_lower.contains("can't run")
         || content_lower.contains("i'm a text-based ai")
@@ -928,7 +1165,23 @@ fn final_answer_requires_tool_retry(
         );
     }
 
+    if final_answer_seeks_permission_for_safe_tool_use(&content_lower, tools) {
+        return Some(
+            "the model asked for permission to use an available safe tool instead of using it directly".into(),
+        );
+    }
+
+    if final_answer_requests_user_supplied_local_inputs(&content_lower, tools) {
+        return Some(
+            "the model asked the user to provide inspectable local inputs instead of using an available safe tool".into(),
+        );
+    }
+
     if let Some(name) = explicit_tool_request(body, tools) {
+        if has_tool_result_after_latest_user(&body.messages) {
+            return None;
+        }
+
         return Some(format!(
             "the user explicitly requested the `{}` tool, but the model answered directly",
             name
@@ -977,11 +1230,17 @@ fn resolve_emulated_tool_name(
 #[cfg(test)]
 mod tests {
     use super::{
+        duplicate_tool_call_error,
         final_answer_claims_external_action, final_answer_contains_inline_tool_call_json,
-        final_answer_requires_tool_retry, format_tool_result_message,
+        final_answer_requests_user_supplied_local_inputs, final_answer_requires_tool_retry,
+        final_answer_seeks_permission_for_safe_tool_use,
+        format_tool_result_message,
         has_tool_result_after_latest_user, inject_emulated_tool_prompt,
+        is_exact_consecutive_duplicate_tool_call, latest_completed_tool_call,
         looks_like_structured_payload, resolve_emulated_tool_name, should_accept_plain_text_final,
-        should_retry_emulated_response, should_stream_emulated_incrementally,
+        next_emulated_conversation_id, normalize_tool_arguments, should_retry_emulated_response,
+        should_store_emulated_tracker,
+        should_stream_emulated_incrementally,
     };
     use crate::providers::ChatMessage;
     use crate::routes::completion_messages::{CompletionMessage, CompletionRequest};
@@ -1005,7 +1264,24 @@ mod tests {
             tools: None,
             tool_choice,
             provider_conversation_id: None,
+            temporary: false,
+            include_provider_debug: false,
         }
+    }
+
+    fn completed_tool_messages(name: &str, arguments: &str) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: format!("Tool call call_1: {}({})", name, arguments),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "ok".into(),
+                tool_call_id: Some("call_1".into()),
+            },
+        ]
     }
 
     #[test]
@@ -1016,11 +1292,198 @@ mod tests {
     }
 
     #[test]
+    fn temporary_emulated_requests_do_not_store_tracker() {
+        assert!(!should_store_emulated_tracker(true));
+    }
+
+    #[test]
+    fn persistent_emulated_requests_still_store_tracker() {
+        assert!(should_store_emulated_tracker(false));
+    }
+
+    #[test]
+    fn temporary_emulated_requests_do_not_reuse_provider_conversation_ids() {
+        let next = next_emulated_conversation_id(
+            true,
+            Some("existing".into()),
+            Some("returned".into()),
+        );
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn persistent_emulated_requests_keep_latest_provider_conversation_id() {
+        let next = next_emulated_conversation_id(
+            false,
+            Some("existing".into()),
+            Some("returned".into()),
+        );
+        assert_eq!(next.as_deref(), Some("returned"));
+    }
+
+    #[test]
+    fn normalizes_tool_arguments_json_for_duplicate_checks() {
+        assert_eq!(
+            normalize_tool_arguments("{\n  \"path\": \"package.json\"\n}"),
+            normalize_tool_arguments("{\"path\":\"package.json\"}")
+        );
+    }
+
+    #[test]
+    fn detects_latest_completed_tool_call() {
+        let messages = completed_tool_messages("read", "{\"path\":\"package.json\"}");
+        let latest = latest_completed_tool_call(&messages).expect("latest tool call");
+        assert_eq!(latest.0, "call_1");
+        assert_eq!(latest.1, "read");
+        assert_eq!(latest.2, "{\"path\":\"package.json\"}");
+    }
+
+    #[test]
+    fn detects_exact_consecutive_duplicate_tool_calls() {
+        let messages = completed_tool_messages("read", "{\"path\":\"package.json\"}");
+        assert!(is_exact_consecutive_duplicate_tool_call(
+            &messages,
+            "read",
+            "{\n  \"path\": \"package.json\"\n}"
+        ));
+    }
+
+    #[test]
+    fn allows_same_tool_with_different_arguments() {
+        let messages = completed_tool_messages("read", "{\"path\":\"package.json\"}");
+        assert!(!is_exact_consecutive_duplicate_tool_call(
+            &messages,
+            "read",
+            "{\"path\":\"Cargo.toml\"}"
+        ));
+    }
+
+    #[test]
+    fn allows_different_tool_after_previous_tool_call() {
+        let messages = completed_tool_messages("read", "{\"path\":\"package.json\"}");
+        assert!(!is_exact_consecutive_duplicate_tool_call(
+            &messages,
+            "bash",
+            "{\"command\":\"pwd\"}"
+        ));
+    }
+
+    #[test]
+    fn duplicate_tool_call_error_mentions_previous_result_guidance() {
+        let err = duplicate_tool_call_error("read", "{\"path\":\"package.json\"}");
+        assert!(err.contains("repeated the exact same consecutive tool call `read`"));
+        assert!(err.contains("previous result is already available"));
+    }
+
+    #[test]
     fn final_answer_retry_triggers_for_explicit_tool_request() {
         let request = request_with_user_text("use bash to print the current directory", None);
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
         let err = final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
         assert!(err.unwrap().contains("explicitly requested the `bash` tool"));
+    }
+
+    #[test]
+    fn detects_permission_seeking_when_safe_tools_are_available() {
+        let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
+        assert!(final_answer_seeks_permission_for_safe_tool_use(
+            "can you confirm if i should read the package.json file to get the package name?",
+            &tools,
+        ));
+    }
+
+    #[test]
+    fn final_answer_retry_triggers_for_permission_seeking_with_safe_tool() {
+        let request = request_with_user_text(
+            "Inspect this repo and tell me the package name.",
+            None,
+        );
+        let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
+        let err = final_answer_requires_tool_retry(
+            &request,
+            &tools,
+            "Can you confirm if I should read the package.json file to get the package name?",
+        );
+        assert!(err
+            .unwrap()
+            .contains("asked for permission to use an available safe tool"));
+    }
+
+    #[test]
+    fn allows_question_when_no_tools_are_available() {
+        let tools = vec![];
+        assert!(!final_answer_seeks_permission_for_safe_tool_use(
+            "can you confirm if i should read the package.json file to get the package name?",
+            &tools,
+        ));
+    }
+
+    #[test]
+    fn detects_user_input_request_when_safe_tools_are_available() {
+        let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
+        assert!(final_answer_requests_user_supplied_local_inputs(
+            "you can provide the 'package.json' and a listing of 'src/commands', and i can extract the answer",
+            &tools,
+        ));
+    }
+
+    #[test]
+    fn final_answer_retry_triggers_for_user_input_request_with_safe_tool() {
+        let request = request_with_user_text(
+            "Use whatever tools you need to inspect this repo and tell me the exact version in package.json.",
+            None,
+        );
+        let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
+        let err = final_answer_requires_tool_retry(
+            &request,
+            &tools,
+            "You can provide the `package.json`, and I can extract the version.",
+        );
+        assert!(err
+            .unwrap()
+            .contains("asked the user to provide inspectable local inputs"));
+    }
+
+    #[test]
+    fn final_answer_retry_triggers_for_permission_denial_wording() {
+        let request = request_with_user_text(
+            "Inspect this repo and tell me the package name.",
+            None,
+        );
+        let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
+        let err = final_answer_requires_tool_retry(
+            &request,
+            &tools,
+            "I currently don’t have permission to read files in your repo.",
+        );
+        assert!(err
+            .unwrap()
+            .contains("incorrectly denied having tool access"));
+    }
+
+    #[test]
+    fn final_answer_after_explicit_tool_request_is_allowed_once_tool_result_exists() {
+        let mut request = request_with_user_text("use bash to print the current directory", None);
+        request.messages.push(CompletionMessage {
+            role: "assistant".into(),
+            content: Some(Value::String(
+                "Tool call call_1: bash({\"command\":\"pwd\"})".into(),
+            )),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        });
+        request.messages.push(CompletionMessage {
+            role: "tool".into(),
+            content: Some(Value::String("/tmp".into())),
+            tool_call_id: Some("call_1".into()),
+            name: None,
+            tool_calls: None,
+        });
+
+        let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
+        let err = final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
+        assert!(err.is_none());
     }
 
     #[test]
@@ -1245,7 +1708,9 @@ mod tests {
         let injected = inject_emulated_tool_prompt(&messages, &[], None);
 
         assert_eq!(injected[0].role, "system");
-        assert!(injected[0].content.contains("tools are optional unless they are clearly necessary"));
+        assert!(injected[0]
+            .content
+            .contains("Use them confidently whenever they help you answer"));
         assert_eq!(injected[1].role, "system");
         assert_eq!(
             injected[1].content,

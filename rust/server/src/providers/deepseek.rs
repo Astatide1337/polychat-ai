@@ -199,6 +199,42 @@ impl DeepSeekProvider {
                 .expect("building reqwest client"),
         }
     }
+
+    async fn create_conversation_with_temporary(&self, temporary: bool) -> anyhow::Result<ProviderConversation> {
+        let token = read_deepseek_token()?;
+        let headers = build_base_headers(&token);
+        let mut body = serde_json::json!({});
+        if temporary {
+            body["is_temp"] = serde_json::Value::from(true);
+        }
+        let res = self.client
+            .post("https://chat.deepseek.com/api/v0/chat_session/create")
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .context("creating DeepSeek conversation")?;
+
+        if !res.status().is_success() {
+            bail!("DeepSeek session creation failed: {}", res.status());
+        }
+
+        let json: serde_json::Value = res.json().await?;
+        let id = json.get("data").and_then(|d| d.get("biz_data"))
+            .and_then(|b| b.get("chat_session")).and_then(|c| c.get("id"))
+            .and_then(|v| v.as_str())
+            .context("DeepSeek session creation did not return a session ID")?;
+
+        Ok(ProviderConversation {
+            id: id.to_string(),
+            provider: "deepseek".into(),
+            title: "New conversation".into(),
+            model_id: None,
+            updated_at: None,
+            url: Some(format!("https://chat.deepseek.com/a/chat/s/{}", id)),
+            provider_debug: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -291,6 +327,7 @@ impl Provider for DeepSeekProvider {
                     updated_at,
                     url: None,
                     model_id: None,
+                    provider_debug: None,
                 });
             }
         }
@@ -298,34 +335,7 @@ impl Provider for DeepSeekProvider {
     }
 
     async fn create_conversation(&self, _model: &str) -> anyhow::Result<ProviderConversation> {
-        let token = read_deepseek_token()?;
-        let headers = build_base_headers(&token);
-        let res = self.client
-            .post("https://chat.deepseek.com/api/v0/chat_session/create")
-            .headers(headers)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .context("creating DeepSeek conversation")?;
-
-        if !res.status().is_success() {
-            bail!("DeepSeek session creation failed: {}", res.status());
-        }
-
-        let json: serde_json::Value = res.json().await?;
-        let id = json.get("data").and_then(|d| d.get("biz_data"))
-            .and_then(|b| b.get("chat_session")).and_then(|c| c.get("id"))
-            .and_then(|v| v.as_str())
-            .context("DeepSeek session creation did not return a session ID")?;
-
-        Ok(ProviderConversation {
-            id: id.to_string(),
-            provider: "deepseek".into(),
-            title: "New conversation".into(),
-            model_id: None,
-            updated_at: None,
-            url: Some(format!("https://chat.deepseek.com/a/chat/s/{}", id)),
-        })
+        self.create_conversation_with_temporary(false).await
     }
 
     async fn send_message(
@@ -342,7 +352,7 @@ impl Provider for DeepSeekProvider {
         let session_id = if let Some(id) = conversation_id {
             id.to_string()
         } else {
-            self.create_conversation(model).await?.id
+            self.create_conversation_with_temporary(options.temporary).await?.id
         };
 
         let prompt = format_last_user_message(messages);

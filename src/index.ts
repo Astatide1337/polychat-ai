@@ -12,6 +12,7 @@ import { registerModelsCommand } from "./commands/models.js";
 import { registerServeCommand } from "./commands/serve.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerSessionCommand } from "./commands/session.js";
+import { registerTemporaryCommand } from "./commands/temporary.js";
 import { registerVerifyCommand } from "./commands/verify.js";
 
 const program = new Command();
@@ -22,6 +23,7 @@ registerInitCommand(program);
 registerDoctorCommand(program);
 registerLoginCommand(program);
 registerLogoutCommand(program);
+registerTemporaryCommand(program);
 registerStatusCommand(program);
 registerServeCommand(program);
 registerChatCommand(program);

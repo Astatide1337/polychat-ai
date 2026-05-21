@@ -511,6 +511,35 @@ fn build_payload(
     payload
 }
 
+fn build_conversation_request_body(payload: &Value, temporary: bool) -> Value {
+    let mut body = payload.as_object().cloned().unwrap_or_default();
+    body.insert("action".into(), Value::from("next"));
+    body.insert("history_and_training_disabled".into(), Value::from(temporary));
+    body.insert("suggestions".into(), Value::Array(vec![]));
+    body.insert("websocket_request_id".into(), Value::from(Uuid::new_v4().to_string()));
+    Value::Object(body)
+}
+
+fn extract_chatgpt_conversation_debug(item: &Value) -> Option<Value> {
+    let mut debug = serde_json::Map::new();
+
+    if let Some(value) = item.get("is_temporary_chat").and_then(Value::as_bool) {
+        debug.insert("is_temporary_chat".into(), Value::Bool(value));
+    }
+    if let Some(value) = item.get("is_do_not_remember").and_then(Value::as_bool) {
+        debug.insert("is_do_not_remember".into(), Value::Bool(value));
+    }
+    if let Some(value) = item.get("memory_scope").and_then(Value::as_str) {
+        debug.insert("memory_scope".into(), Value::String(value.to_string()));
+    }
+
+    if debug.is_empty() {
+        None
+    } else {
+        Some(Value::Object(debug))
+    }
+}
+
 fn split_chatgpt_delta(delta: &str) -> Vec<String> {
     let chars: Vec<char> = delta.chars().collect();
     let mut chunks = Vec::new();
@@ -617,6 +646,7 @@ impl Provider for ChatGptProvider {
                     model_id: None,
                     updated_at,
                     url: None,
+                    provider_debug: extract_chatgpt_conversation_debug(item),
                 });
             }
         }
@@ -634,42 +664,38 @@ impl Provider for ChatGptProvider {
             model_id: None,
             updated_at: None,
             url: None,
+            provider_debug: None,
         })
     }
 
     fn tool_call_strategy(&self) -> ToolCallStrategy { ToolCallStrategy::Emulated }
 
-    async fn send_message(
-        &self,
-        messages: &[ChatMessage],
-        model: &str,
-        _options: &ChatOptions,
-        conversation_id: Option<&str>,
-    ) -> anyhow::Result<ProviderResponse> {
-        let auth = self.get_auth().await?;
-        let headers = self.get_completion_headers(&auth).await?;
-        let parent_message_id = if let Some(conversation_id) = conversation_id {
-            self.fetch_current_node(&auth, conversation_id).await?
-        } else {
-            None
-        };
-        let payload = build_payload(
-            messages,
-            model,
-            conversation_id,
-            parent_message_id.as_deref(),
-            reasoning_effort_for_request(_options),
-        );
+async fn send_message(
+    &self,
+    messages: &[ChatMessage],
+    model: &str,
+    options: &ChatOptions,
+    conversation_id: Option<&str>,
+) -> anyhow::Result<ProviderResponse> {
+    let auth = self.get_auth().await?;
+    let headers = self.get_completion_headers(&auth).await?;
+    let parent_message_id = if let Some(conversation_id) = conversation_id {
+        self.fetch_current_node(&auth, conversation_id).await?
+    } else {
+        None
+    };
+    let payload = build_payload(
+        messages,
+        model,
+        conversation_id,
+        parent_message_id.as_deref(),
+        reasoning_effort_for_request(options),
+    );
 
-        let mut body = payload.as_object().cloned().unwrap_or_default();
-        body.insert("action".into(), Value::from("next"));
-        body.insert("history_and_training_disabled".into(), Value::from(false));
-        body.insert("conversation_mode".into(), serde_json::json!({ "kind": "primary_assistant" }));
-        body.insert("force_paragen".into(), Value::from(false));
-        body.insert("force_rate_limit".into(), Value::from(false));
+    let body = build_conversation_request_body(&payload, options.temporary);
 
         let res = self.client
-            .post("https://chatgpt.com/backend-api/conversation")
+            .post("https://chatgpt.com/backend-api/f/conversation")
             .headers(headers)
             .json(&body)
             .send()
@@ -928,8 +954,12 @@ fn extract_chatgpt_tool_call(data: &Value) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_payload, reasoning_effort_for_request, split_chatgpt_delta};
+    use super::{
+        build_conversation_request_body, build_payload, extract_chatgpt_conversation_debug,
+        reasoning_effort_for_request, split_chatgpt_delta,
+    };
     use crate::providers::{ChatMessage, ChatOptions};
+    use serde_json::{json, Value};
 
     #[test]
     fn build_payload_uses_supplied_parent_message_id() {
@@ -1057,6 +1087,79 @@ mod tests {
     }
 
     #[test]
+    fn temporary_conversation_requests_match_browser_shape() {
+        let payload = build_payload(
+            &[ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                tool_call_id: None,
+            }],
+            "gpt-5-5",
+            None,
+            None,
+            None,
+        );
+
+        let body = build_conversation_request_body(&payload, true);
+
+        assert_eq!(
+            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(body.get("conversation_mode").is_none());
+        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
+        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
+        assert!(body.get("force_paragen").is_none());
+        assert!(body.get("force_rate_limit").is_none());
+    }
+
+    #[test]
+    fn regular_conversation_requests_match_browser_shape() {
+        let payload = build_payload(
+            &[ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                tool_call_id: None,
+            }],
+            "gpt-5-5",
+            None,
+            None,
+            None,
+        );
+
+        let body = build_conversation_request_body(&payload, false);
+
+        assert_eq!(
+            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(body.get("conversation_mode").is_none());
+        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
+        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
+        assert!(body.get("force_paragen").is_none());
+        assert!(body.get("force_rate_limit").is_none());
+    }
+
+    #[test]
+    fn extracts_chatgpt_conversation_temp_debug_fields() {
+        let debug = extract_chatgpt_conversation_debug(&json!({
+            "is_temporary_chat": true,
+            "is_do_not_remember": true,
+            "memory_scope": "global_disabled"
+        }))
+        .expect("debug metadata");
+
+        assert_eq!(debug.get("is_temporary_chat").and_then(Value::as_bool), Some(true));
+        assert_eq!(debug.get("is_do_not_remember").and_then(Value::as_bool), Some(true));
+        assert_eq!(debug.get("memory_scope").and_then(Value::as_str), Some("global_disabled"));
+    }
+
+    #[test]
+    fn omits_chatgpt_conversation_debug_when_fields_missing() {
+        assert!(extract_chatgpt_conversation_debug(&json!({ "title": "hello" })).is_none());
+    }
+
+    #[test]
     fn streaming_requests_disable_reasoning_effort() {
         let options = ChatOptions {
             temperature: None,
@@ -1066,6 +1169,7 @@ mod tests {
             stop: vec![],
             tools: Vec::new(),
             tool_choice: None,
+            temporary: false,
         };
 
         assert_eq!(reasoning_effort_for_request(&options), None);
@@ -1081,6 +1185,7 @@ mod tests {
             stop: vec![],
             tools: Vec::new(),
             tool_choice: None,
+            temporary: false,
         };
 
         assert_eq!(reasoning_effort_for_request(&options), Some("medium"));
@@ -1097,6 +1202,7 @@ mod tests {
         assert_eq!(chunks.concat(), "Ariel has fault canyons and resurfaced plains that suggest internal activity long after its formation.");
         assert!(chunks.iter().take(chunks.len().saturating_sub(1)).all(|chunk| chunk.len() <= 36));
     }
+
 }
 // ---------------------------------------------------------------------------
 // Model normalization

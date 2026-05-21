@@ -46,6 +46,8 @@ List conversations:
 GET https://chatgpt.com/backend-api/conversations?offset=0&limit=50&order=updated
 ```
 
+When ChatGPT includes them, Polychat preserves temporary-related fields from that listing in `providerDebug`, including `is_temporary_chat`, `is_do_not_remember`, and `memory_scope`.
+
 Load a conversation before continuing it:
 
 ```text
@@ -66,3 +68,17 @@ Because of that:
 ## Tool Calling
 
 ChatGPT web does not support arbitrary custom function tools through its consumer web API. Polychat therefore uses emulated tool calling for ChatGPT and returns OpenAI-style `tool_calls` to the client after parsing and validating ChatGPT's plain-text planner output.
+
+## Temporary Chat
+
+When `temporary: true` is set on a completion request (or the provider's `temporary` config default is `true`), Polychat sends the same browser-style temporary-chat request shape ChatGPT web currently uses: `history_and_training_disabled: true`, `suggestions: []`, a fresh `websocket_request_id`, and the `/backend-api/f/conversation` endpoint.
+
+Polychat also forces temporary ChatGPT turns to be stateless at the provider layer:
+
+- it does not reuse a prior `provider_conversation_id`
+- it does not consult or store the in-memory conversation tracker
+- it replays recent message history into each request so the model still has conversation context
+
+The goal is to preserve conversational context without binding the session to a reusable ChatGPT conversation thread.
+
+For non-streaming completions, `include_provider_debug: true` exposes lightweight tracing data such as the provider-side conversation id and whether Polychat used a new, tracked, or explicit conversation id.

@@ -252,6 +252,7 @@ impl Provider for KimiProvider {
                     model_id: None,
                     updated_at,
                     url: Some(url),
+                    provider_debug: None,
                 })
             })
             .collect();
@@ -304,6 +305,7 @@ impl Provider for KimiProvider {
             model_id: None,
             updated_at: None,
             url: None,
+            provider_debug: None,
         })
     }
 

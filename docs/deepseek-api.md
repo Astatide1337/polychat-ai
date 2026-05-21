@@ -44,3 +44,7 @@ DeepSeek requires per-request proof-of-work. Polychat solves this automatically 
 ## Tool Calling
 
 DeepSeek is the one provider that still works well with Polychat's prompt-injected tool protocol, so it stays on the simpler non-emulated path.
+
+## Temporary Chat
+
+When `temporary: true` is set on a completion request (or the provider's `temporary` config default is `true`), Polychat includes `"is_temp": true` in the create-conversation request body (`POST /api/v0/chat_session/create`). This tells DeepSeek not to persist the conversation in the user's chat history.

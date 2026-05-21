@@ -19,6 +19,13 @@ pub struct CompletionRequest {
     pub tool_choice: Option<Value>,
     #[serde(alias = "providerConversationId")]
     pub provider_conversation_id: Option<String>,
+    /// When true, the conversation should not be saved to the provider's
+    /// history. Propagated to ChatOptions.temporary and then to each
+    /// provider's API-specific temporary-chat field.
+    #[serde(default)]
+    pub temporary: bool,
+    #[serde(default, alias = "includeProviderDebug")]
+    pub include_provider_debug: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -188,5 +195,40 @@ mod tests {
             request.provider_conversation_id.as_deref(),
             Some("conv-123")
         );
+    }
+
+    #[test]
+    fn completion_request_temporary_defaults_to_false() {
+        let body = json!({
+            "model": "gpt-5-5",
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let request: CompletionRequest = serde_json::from_value(body).expect("deserialize request");
+        assert!(!request.temporary);
+    }
+
+    #[test]
+    fn completion_request_temporary_deserializes_true() {
+        let body = json!({
+            "model": "gpt-5-5",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "temporary": true
+        });
+
+        let request: CompletionRequest = serde_json::from_value(body).expect("deserialize request");
+        assert!(request.temporary);
+    }
+
+    #[test]
+    fn completion_request_accepts_include_provider_debug_alias() {
+        let body = json!({
+            "model": "gpt-5-5",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "includeProviderDebug": true
+        });
+
+        let request: CompletionRequest = serde_json::from_value(body).expect("deserialize request");
+        assert!(request.include_provider_debug);
     }
 }

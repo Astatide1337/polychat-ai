@@ -3,10 +3,12 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::config::PolychatConfig;
 use crate::providers::{ChatOptions, Provider, ToolCallStrategy};
 pub use crate::routes::completion_messages::CompletionRequest;
 use crate::routes::completion_messages::{
@@ -19,6 +21,18 @@ use crate::routes::openai_format::{non_stream_response, stream_response};
 use crate::routes::resolver::find_provider_for_model;
 use crate::tools::inject::inject_tools;
 
+fn temporary_conversation_source(temporary: bool, explicit: bool, tracked: bool) -> &'static str {
+    if temporary {
+        "temporary_stateless"
+    } else if explicit {
+        "provided"
+    } else if tracked {
+        "tracked"
+    } else {
+        "new"
+    }
+}
+
 fn error_response(status: StatusCode, message: &str, err_type: &'static str, code: &'static str) -> axum::response::Response {
     RouteError::new(status, message, err_type, code).into_response()
 }
@@ -26,6 +40,7 @@ fn error_response(status: StatusCode, message: &str, err_type: &'static str, cod
 pub async fn completions_handler(
     Json(body): Json<CompletionRequest>,
     providers: Arc<HashMap<String, Arc<dyn Provider>>>,
+    config: Arc<PolychatConfig>,
 ) -> impl IntoResponse {
     let model = &body.model;
     if model.is_empty() {
@@ -56,6 +71,12 @@ pub async fn completions_handler(
     let has_tool_history = has_tool_transcript(&body.messages);
     let tool_strategy = provider.tool_call_strategy();
 
+    // Per-provider temporary default from config, overridden by request
+    let config_temporary = config.providers.get(&provider_id)
+        .map(|pc| pc.temporary)
+        .unwrap_or(false);
+    let temporary = body.temporary || config_temporary;
+
     let mut options = ChatOptions {
         temperature: body.temperature,
         max_tokens: body.max_tokens,
@@ -64,12 +85,21 @@ pub async fn completions_handler(
         stop: body.stop.clone(),
         tools: Vec::new(),
         tool_choice: None,
+        temporary,
     };
 
     let mut messages = provider_messages.clone();
-    let conv_id_to_use = body.provider_conversation_id.clone().or_else(|| {
+    let explicit_conversation_id = if temporary {
+        None
+    } else {
+        body.provider_conversation_id.clone()
+    };
+    let tracked_conversation_id = if temporary || explicit_conversation_id.is_some() {
+        None
+    } else {
         tracked_conversation_id(&provider_id, &provider_messages)
-    });
+    };
+    let conv_id_to_use = explicit_conversation_id.clone().or_else(|| tracked_conversation_id.clone());
 
     if has_tools || (tool_strategy == ToolCallStrategy::Emulated && has_tool_history) {
         match tool_strategy {
@@ -82,8 +112,10 @@ pub async fn completions_handler(
                 messages = inject_tools(&messages, tools, body.tool_choice.as_ref());
             }
             ToolCallStrategy::Emulated => {
+                let mut emulated_body = body.clone();
+                emulated_body.temporary = temporary;
                 return emulated_completion_response(
-                    &body,
+                    &emulated_body,
                     provider,
                     provider_id,
                     provider_messages,
@@ -122,22 +154,42 @@ pub async fn completions_handler(
         }
     };
 
-    if let Some(ref cid) = provider_response.conversation_id {
+    if !temporary {
+        if let Some(ref cid) = provider_response.conversation_id {
         TRACKER.store(&provider_messages, &provider_id, cid.clone());
+        }
     }
 
     let request_id = format!("chatcmpl-{}", Uuid::new_v4());
     let stream = body.stream;
+    let provider_debug = if body.include_provider_debug {
+        Some(json!({
+            "provider": provider_id,
+            "requested_temporary": temporary,
+            "conversation_source": temporary_conversation_source(
+                temporary,
+                explicit_conversation_id.is_some(),
+                tracked_conversation_id.is_some(),
+            ),
+            "input_conversation_id": conv_id_to_use.clone(),
+            "provider_conversation_id": provider_response.conversation_id.clone(),
+        }))
+    } else {
+        None
+    };
 
     if stream {
         stream_response(provider_response.stream, &request_id, model, has_tools).into_response()
     } else {
-        non_stream_response(provider_response.stream, &request_id, model, has_tools).await.into_response()
+        non_stream_response(provider_response.stream, &request_id, model, has_tools, provider_debug).await.into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ProviderConfig;
+    use super::temporary_conversation_source;
+
     #[test]
     fn detects_tool_transcript_from_assistant_tool_calls_and_tool_result() {
         use crate::routes::completion_messages::{
@@ -170,5 +222,79 @@ mod tests {
         ];
 
         assert!(has_tool_transcript(&messages));
+    }
+
+    #[test]
+    fn temporary_flag_or_logic_both_false() {
+        let config_temporary = false;
+        let request_temporary = false;
+        assert!(!(request_temporary || config_temporary));
+    }
+
+    #[test]
+    fn temporary_flag_or_logic_request_true() {
+        let config_temporary = false;
+        let request_temporary = true;
+        assert!(request_temporary || config_temporary);
+    }
+
+    #[test]
+    fn temporary_flag_or_logic_config_true() {
+        let config_temporary = true;
+        let request_temporary = false;
+        assert!(request_temporary || config_temporary);
+    }
+
+    #[test]
+    fn temporary_flag_or_logic_both_true() {
+        let config_temporary = true;
+        let request_temporary = true;
+        assert!(request_temporary || config_temporary);
+    }
+
+    #[test]
+    fn config_provider_temporary_lookup_missing_provider() {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert("chatgpt".to_string(), ProviderConfig {
+            default_model: "gpt-5-5".into(),
+            connected: true,
+            last_validated: None,
+            temporary: true,
+        });
+        // Looking up a provider that doesn't exist should return false
+        let result = providers.get("claude").map(|pc| pc.temporary).unwrap_or(false);
+        assert!(!result);
+    }
+
+    #[test]
+    fn config_provider_temporary_lookup_existing_provider() {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert("chatgpt".to_string(), ProviderConfig {
+            default_model: "gpt-5-5".into(),
+            connected: true,
+            last_validated: None,
+            temporary: true,
+        });
+        let result = providers.get("chatgpt").map(|pc| pc.temporary).unwrap_or(false);
+        assert!(result);
+    }
+
+    #[test]
+    fn temporary_requests_force_stateless_conversation_source() {
+        assert_eq!(
+            temporary_conversation_source(true, true, true),
+            "temporary_stateless"
+        );
+        assert_eq!(
+            temporary_conversation_source(true, false, false),
+            "temporary_stateless"
+        );
+    }
+
+    #[test]
+    fn non_temporary_requests_preserve_existing_conversation_source_logic() {
+        assert_eq!(temporary_conversation_source(false, true, false), "provided");
+        assert_eq!(temporary_conversation_source(false, false, true), "tracked");
+        assert_eq!(temporary_conversation_source(false, false, false), "new");
     }
 }

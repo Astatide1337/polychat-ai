@@ -51,7 +51,7 @@ rust/server/src/
     claude.rs     Claude HTTPS provider (cookie auth)
     chatgpt.rs    ChatGPT HTTPS provider + cookie jar + PoW
 kimi.rs Kimi cookie provider (kimi-auth cookie + v2 Connect RPC list_conversations)
-    gemini.rs     Gemini web provider (SNlM0e token from BardChatUi)
+gemini.rs Gemini web provider (SNlM0e token from BardChatUi, conversation continuity via metadata)
  sse.rs Shared SSE stream parser (reserved for future provider consolidation)
   routes/
     completions.rs POST /v1/chat/completions — streaming and non-streaming
@@ -108,7 +108,7 @@ node --test test/phase2.test.mjs   # 40 tests — Phase 2 (Login infrastructure 
 node --test test/phase3.test.mjs   # Phase 3 (Provider rollout: Gemini, Kimi)
 
 # Rust unit tests
-cd rust && cargo test --bin polychat-server   # 12 tests
+cd rust && cargo test --bin polychat-server # 97 tests
 ```
 
 114 total automated tests across all suites.
@@ -132,10 +132,10 @@ Config at `~/.polychat/config.json` — camelCase keys:
   "lastValidated": "...",
   "server": { "port": 1443, "host": "127.0.0.1" },
   "providers": {
-    "deepseek": { "connected": true, "defaultModel": "..." },
-    "claude": { "connected": true, "defaultModel": "..." },
-    "chatgpt": { "connected": true, "defaultModel": "..." },
-    "gemini": { "connected": true, "defaultModel": "gemini-2.5-flash" },
+    "deepseek": { "connected": true, "defaultModel": "...", "temporary": false },
+    "claude": { "connected": true, "defaultModel": "...", "temporary": false },
+    "chatgpt": { "connected": true, "defaultModel": "...", "temporary": false },
+    "gemini": { "connected": true, "defaultModel": "gemini-2.5-flash", "temporary": false },
     "kimi": { "connected": false, "defaultModel": "kimi" }
   }
 }
@@ -211,12 +211,23 @@ All providers use cookie-based sessions from Firefox profile reading or CDP logi
   1. Fetch `https://gemini.google.com/app` with session cookies → extract `SNlM0e` token
   2. POST to `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`
      with `at=<SNlM0e>` and `f.req=[null, json(inner_req_list)]`
-  3. Parse line-delimited JSON response: text at `arr[0][2] → inner[4][0][1][0]`
+  3. Parse line-delimited JSON response: text at `arr[0][2] → inner[4][0][1][0]`,
+     conversation metadata at `inner[1]` (cid, rid, rcid)
 - **SNlM0e token**: Extracted from Gemini app page HTML (`"SNlM0e":"<token>"`)
 - **Session expiry**: `__cf_bm` Cloudflare cookies expire in ~30 minutes. Re-run
   `polychat login gemini` when Gemini returns 403 errors.
-- **Models**: `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash` (static list)
-- **No persistent conversations**: Gemini web API is stateless; each call creates a new conversation
+- **Models**: `gemini-3.1-pro`, `gemini-3.1-flash-lite`, `gemini-3-flash`, `gemini-3-pro`, `gemini-2.5-pro`, `gemini-2.5-flash` (static list)
+- **Conversation continuity**: Gemini supports multi-turn conversations via metadata
+  passed in `inner_req_list[2]`. The metadata array (cid, rid, rcid, ...) is extracted
+  from the response at `inner[1]` and encoded as a JSON string for the `conversation_id`
+  field. On subsequent requests, this JSON string is parsed back and placed at
+  `inner[2]` to continue the conversation. The `ConversationTracker` in
+  `completions.rs` automatically maps message history to the Gemini metadata.
+- **Temporary chat**: Setting `inner_req_list[45] = 1` prevents the conversation from
+  being saved to the user's Gemini history. Controlled via the `temporary` flag.
+- **List conversations**: Uses batchexecute RPC with rpcid `MaZiqc` at
+  `POST https://gemini.google.com/_/BardChatUi/data/batchexecute`. Fetches both
+  pinned and unpinned chats in parallel.
 - **Key dependencies**: `urlencoding` crate in Rust for URL-encoding `f.req` and `at` parameters
 
 
@@ -276,6 +287,7 @@ All routes except `/health` require `Authorization: Bearer <POLYCHAT_API_KEY>` w
   "messages": [...],
   "stream": true,
   "provider_conversation_id": "uuid-of-existing-conversation",
+  "temporary": true,
   "tools": [...],
   "tool_choice": "auto"
 }
@@ -283,6 +295,13 @@ All routes except `/health` require `Authorization: Bearer <POLYCHAT_API_KEY>` w
 
 `provider_conversation_id` routes the message into an existing provider-side conversation.
 Omit it (or set to null) to create a new conversation automatically.
+
+`temporary` prevents the conversation from being saved to the provider's history.
+Supported by ChatGPT (`history_and_training_disabled`), Claude (`is_temporary`),
+DeepSeek (`is_temp`), and Gemini (`inner_req_list[45] = 1`). Ignored by Kimi
+(no API support). Can also be set as a per-provider default in
+`~/.polychat/config.json` via the `temporary` field; the request-level flag is
+OR'd with the config default.
 
 ### Conversation continuity (auto-tracking)
 
@@ -369,8 +388,10 @@ POLYCHAT_TEST_KIMI_CONVERSATION_ID=<your-kimi-test-conversation-id>
 | DeepSeek | ✅ Working | `deepseek-chat` | Use `$POLYCHAT_TEST_DEEPSEEK_CONVERSATION_ID` |
 | Claude | ✅ Working | `claude-sonnet-4-6` | Use `$POLYCHAT_TEST_CLAUDE_CONVERSATION_ID` |
 | ChatGPT | ✅ Working | `gpt-5-mini` | Use `$POLYCHAT_TEST_CHATGPT_CONVERSATION_ID` |
-| Gemini | ✅ Working | `gemini-2.5-flash` | Stateless — no conversation ID needed. Re-run `polychat login gemini` when SNlM0e expires (~hours) |
+| Gemini | ✅ Working | `gemini-2.5-flash` | Supports conversation continuity via metadata. Use `provider_conversation_id` to continue an existing conversation. Re-run `polychat login gemini` when SNlM0e expires (~hours) |
 | Kimi | ✅ Working | `kimi` | Use `$POLYCHAT_TEST_KIMI_CONVERSATION_ID` |
+
+ONLY use ONE singular test conversation and do NOT create new conversations on every request.
 
 ### E2E Testing — Realistic Usage Required
 
@@ -401,15 +422,15 @@ curl -s http://127.0.0.1:1443/v1/chat/completions \
   }'
 ```
 
-Gemini (stateless — no conversation_id):
+Gemini (supports conversation continuity via metadata):
 ```bash
 curl -s http://127.0.0.1:1443/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
-    "messages": [{"role": "user", "content": "What are three interesting facts about the planet Mars?"}],
-    "stream": false
-  }'
+  "model": "gemini-2.5-flash",
+  "messages": [{"role": "user", "content": "What are three interesting facts about the planet Mars?"}],
+  "stream": false
+}'
 ```
 
 ### Unit Tests
@@ -434,7 +455,7 @@ live APIs and produce side effects.
 
 Before claiming a change is complete:
 
-1. `cd rust && cargo test --bin polychat-server` — all 12 unit tests must pass
+1. `cd rust && cargo test --bin polychat-server` — all 97 unit tests must pass
 2. `cd rust && cargo build --release` — zero errors (warnings acceptable)
 3. Start the server: `rust/target/release/polychat-server --port 1443`
 4. Run the test matrix using the designated conversation IDs above
@@ -517,9 +538,12 @@ change to the Claude SSE parser must preserve this.
 The `v` field is a string, not a fragment object. Handle `val.as_str()` before treating it
 as a fragment array.
 
-**Gemini is stateless.** The BardChatUi web API creates a new conversation on each call.
-The returned conversation metadata (`cid`, `rid`, `rcid`) is not used in subsequent requests
-unless multi-turn is implemented in the Rust provider.
+**Gemini supports conversation continuity.** The BardChatUi web API returns
+conversation metadata (cid, rid, rcid) at `inner[1]` of the response. This
+metadata is passed as `inner_req_list[2]` in subsequent requests to continue
+the conversation. The `conversation_id` field is a JSON-serialized metadata
+array (not a simple UUID). The `ConversationTracker` automatically maps
+message history to the Gemini metadata for multi-turn conversations.
 
 **Tool call parser `flush()` is mandatory.** A tool call that arrives in the last SSE chunk
 will be in the `MaybeStart` or `Accumulating` state. Always call `flush()` after the stream
@@ -534,10 +558,10 @@ ends; never discard its output.
   Use per-request `.timeout(Duration::from_secs(15))` on non-streaming calls only.
 - Do not use `Aes256Gcm` (standard alias). Use `AesGcm<Aes256, U16>` explicitly.
 - Do not use scrypt N=32768 (2^15). The correct value is 16384 (2^14).
-- Do not send completions without `provider_conversation_id` during testing (except Gemini). Kimi has a test conversation ID.
+- Do not send completions without `provider_conversation_id` during testing (except for the first message in a new Gemini conversation). Kimi has a test conversation ID.
 - Do not create parallel conventions for the same pattern. If a pattern exists, follow it.
 - Do not import `playwright-core` anywhere. It has been removed from the project.
 - Do not reference `src/server/` — it has been deleted. The Rust server handles all HTTP.
 - Do not reference `src/browser/pool.ts` — it has been deleted. Use `cdp.ts` or `oauth.ts`.
 - Do not send trivial "ping/pong" test messages to providers — use realistic, substantive prompts to avoid suspicious-activity flags.
-- Do not assume all providers support persistent conversations. Gemini is stateless.
+- Do not assume all providers support persistent conversations. Kimi creates a new conversation if no `provider_conversation_id` is provided.
