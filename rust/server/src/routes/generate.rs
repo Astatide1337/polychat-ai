@@ -24,13 +24,6 @@ pub struct GenerateRequest {
     pub stream: bool,
     #[serde(default)]
     pub temporary: bool,
-    pub options: Option<GenerateOptions>,
-}
-
-#[derive(Deserialize)]
-pub struct GenerateOptions {
-    pub temperature: Option<f32>,
-    pub num_predict: Option<u32>,
 }
 
 pub async fn generate_handler(
@@ -69,8 +62,6 @@ pub async fn generate_handler(
         .unwrap_or(false);
 
     let options = ChatOptions {
-        temperature: body.options.as_ref().and_then(|o| o.temperature),
-        max_tokens: body.options.as_ref().and_then(|o| o.num_predict),
         reasoning_effort: None,
         stream: body.stream,
         stop: vec![],

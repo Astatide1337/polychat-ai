@@ -399,10 +399,13 @@ fn stream_kimi_chunks(response: reqwest::Response) -> ChunkStream {
                     continue;
                 }
 
-                // SSE format: "data: <json>"
+                // Kimi SSE format: can be "data: <json>" or raw JSON lines
                 let json_str = if let Some(rest) = trimmed.strip_prefix("data: ") {
                     rest
-                } else {
+                } else if trimmed.starts_with('{') {
+                // Raw JSON line (no SSE prefix)
+                trimmed
+            } else {
                     // Ignore non-data lines (event:, id:, etc.)
                     continue;
                 };

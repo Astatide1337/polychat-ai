@@ -514,8 +514,6 @@ async fn run_emulated_completion(
                 &working_messages,
                 &body.model,
         &ChatOptions {
-            temperature: body.temperature,
-            max_tokens: body.max_tokens,
             reasoning_effort: body.reasoning_effort.clone(),
             stream: body.stream,
             stop: body.stop.clone(),
@@ -760,8 +758,6 @@ async fn run_emulated_completion_streaming(
                 &working_messages,
                 &body.model,
         &ChatOptions {
-            temperature: body.temperature,
-            max_tokens: body.max_tokens,
             reasoning_effort: body.reasoning_effort.clone(),
             stream: body.stream,
             stop: body.stop.clone(),
@@ -1258,8 +1254,6 @@ mod tests {
             }],
             stream: false,
             reasoning_effort: None,
-            temperature: None,
-            max_tokens: None,
             stop: Vec::new(),
             tools: None,
             tool_choice,

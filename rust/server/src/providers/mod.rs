@@ -20,9 +20,9 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
-    #[allow(dead_code)] pub temperature: Option<f32>,
-    #[allow(dead_code)] pub max_tokens: Option<u32>,
-    #[allow(dead_code)] pub reasoning_effort: Option<String>,
+
+
+    pub reasoning_effort: Option<String>,
     pub stream: bool,
     pub stop: Vec<String>,
     /// Native OpenAI-format tool definitions. When non-empty, the provider
@@ -174,7 +174,7 @@ pub fn collect_set_cookies(res: &reqwest::Response) -> Vec<String> {
 #[async_trait]
 pub trait Provider: Send + Sync + 'static {
  #[allow(dead_code)]
-    fn id(&self) -> &'static str;
+    #[allow(dead_code)] fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
 
     /// Check if the session is valid by making a lightweight API call.
@@ -208,4 +208,3 @@ pub mod claude;
 pub mod chatgpt;
 pub mod gemini;
 pub mod kimi;
-pub mod sse;

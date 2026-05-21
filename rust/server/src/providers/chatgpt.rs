@@ -1162,8 +1162,6 @@ mod tests {
     #[test]
     fn streaming_requests_disable_reasoning_effort() {
         let options = ChatOptions {
-            temperature: None,
-            max_tokens: None,
             reasoning_effort: Some("medium".into()),
             stream: true,
             stop: vec![],
@@ -1178,8 +1176,6 @@ mod tests {
     #[test]
     fn non_streaming_requests_keep_reasoning_effort() {
         let options = ChatOptions {
-            temperature: None,
-            max_tokens: None,
             reasoning_effort: Some("medium".into()),
             stream: false,
             stop: vec![],

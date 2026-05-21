@@ -11,8 +11,6 @@ pub struct CompletionRequest {
     pub stream: bool,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stop: Vec<String>,
     pub tools: Option<Vec<Value>>,
