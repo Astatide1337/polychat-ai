@@ -12,20 +12,21 @@ mod pow;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-
+use tokio::sync::RwLock;
 use providers::Provider;
 use providers::deepseek::DeepSeekProvider;
 use providers::claude::ClaudeProvider;
 use providers::chatgpt::ChatGptProvider;
 use providers::gemini::GeminiProvider;
 use providers::kimi::KimiProvider;
+use routes::model_registry::ModelRegistry;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -52,7 +53,6 @@ async fn main() {
     tracing::info!("Encryption self-test passed");
 
     let mut provider_map: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-
     for (id, name, _default_model) in config::PROVIDERS {
         if session::has_session(id) {
             match session::load_session(id) {
@@ -73,20 +73,17 @@ async fn main() {
             "deepseek" => Arc::new(DeepSeekProvider::new()),
             "claude" => Arc::new(ClaudeProvider::new()),
             "chatgpt" => Arc::new(ChatGptProvider::new()),
- "gemini" => Arc::new(GeminiProvider::new()),
+            "gemini" => Arc::new(GeminiProvider::new()),
             "kimi" => Arc::new(KimiProvider::new()),
             _ => continue,
         };
-
         provider_map.insert(id.to_string(), provider);
     }
-
     tracing::info!("{} provider(s) loaded", provider_map.len());
 
     let args: Vec<String> = std::env::args().collect();
     let mut port = config.server.port;
     let mut host = config.server.host.clone();
-
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -108,9 +105,16 @@ async fn main() {
     }
 
     let providers = Arc::new(provider_map);
+
+    // Build model registry from all connected providers
+    let registry = ModelRegistry::build(&providers).await;
+    tracing::info!("Model registry built with {} models", registry.len());
+    let registry = Arc::new(RwLock::new(registry));
+
     let config = Arc::new(config);
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let app = router::build_router(providers, config, shutdown_tx);
+    let app = router::build_router(providers, config, registry, shutdown_tx);
 
     let addr = format!("{}:{}", host, port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -124,7 +128,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-
     tracing::info!("Polychat server running at http://{}:{}", host, port);
 
     let shutdown_signal = async {

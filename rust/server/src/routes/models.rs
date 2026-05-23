@@ -1,11 +1,14 @@
 //! GET /v1/models and GET /v1/models/:model_id.
 
-use axum::{extract::Path, Json};
+use axum::extract::Path;
+use axum::Json;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
+use std::sync::Arc;
 
 use crate::routes::errors::RouteError;
-use crate::routes::resolver::{Providers, find_model, list_connected_models};
+use crate::routes::model_registry::ModelRegistry;
 
 fn serialize_model(model: crate::providers::ModelInfo) -> Value {
     let mut value = json!({
@@ -22,13 +25,13 @@ fn serialize_model(model: crate::providers::ModelInfo) -> Value {
 }
 
 pub async fn list_models_handler(
-    providers: Providers,
+    registry: Arc<RwLock<ModelRegistry>>,
 ) -> Json<Value> {
+    let registry = registry.read().await;
     let mut all_models = Vec::new();
-    for model in list_connected_models(&providers, 20).await {
+    for model in registry.list_models() {
         all_models.push(serialize_model(model));
     }
-
     Json(json!({
         "object": "list",
         "data": all_models,
@@ -37,12 +40,12 @@ pub async fn list_models_handler(
 
 pub async fn get_model_handler(
     Path(model_id): Path<String>,
-    providers: Providers,
+    registry: Arc<RwLock<ModelRegistry>>,
 ) -> (StatusCode, Json<Value>) {
-    if let Some(model) = find_model(&model_id, &providers, 20).await {
+    let registry = registry.read().await;
+    if let Some(model) = registry.find_model(&model_id) {
         return (StatusCode::OK, Json(serialize_model(model)));
     }
-
     RouteError::new(
         StatusCode::NOT_FOUND,
         format!("Model '{}' not found. Run 'polychat models' to see available models.", model_id),

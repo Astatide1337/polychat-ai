@@ -1,4 +1,5 @@
 pub mod health;
+pub mod model_registry;
 pub mod models;
 pub mod completions;
 pub mod completion_messages;

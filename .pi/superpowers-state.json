@@ -30,14 +30,15 @@
     "phase": "idle",
     "testFiles": [],
     "sourceFiles": [
-      "/home/sohamb/Desktop/polychat/src/providers/types.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/registry.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/deepseek.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/chatgpt.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/claude.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/gemini.ts",
-      "/home/sohamb/Desktop/polychat/src/providers/kimi.ts",
-      "/home/sohamb/Desktop/polychat/src/commands/login.ts"
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/model_registry.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/mod.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/main.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/router.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/sessions.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/models.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/completions.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/generate.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/resolver.rs"
     ],
     "redVerificationPending": false
   },

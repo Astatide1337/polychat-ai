@@ -7,9 +7,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::config::{get_api_key, load_config, PROVIDERS};
+use crate::routes::model_registry::ModelRegistry;
+use crate::router::{Providers, SharedModelRegistry};
 use crate::session::{
-    delete_session, has_session, normalize_storage_state,
-    save_session, unseal_transport_envelope, TransportEnvelope,
+    delete_session,
+    has_session,
+    normalize_storage_state,
+    save_session,
+    unseal_transport_envelope,
+    TransportEnvelope,
 };
 
 // Rate limiting state
@@ -31,7 +37,6 @@ fn check_rate_limit(api_key: &str) -> bool {
     let mut rates = PUSH_RATES.lock().unwrap();
     let now = Instant::now();
     let record = rates.get_mut(api_key);
-
     match record {
         Some(r) if now.duration_since(r.window_start).as_secs() > PUSH_WINDOW_SECS => {
             r.count = 1;
@@ -39,7 +44,10 @@ fn check_rate_limit(api_key: &str) -> bool {
             true
         }
         Some(r) if r.count >= PUSH_LIMIT => false,
-        Some(r) => { r.count += 1; true }
+        Some(r) => {
+            r.count += 1;
+            true
+        }
         None => {
             rates.insert(api_key.to_string(), PushRecord { count: 1, window_start: now });
             true
@@ -50,12 +58,18 @@ fn check_rate_limit(api_key: &str) -> bool {
 pub async fn push_session_handler(
     Path(provider): Path<String>,
     Json(envelope): Json<TransportEnvelope>,
+    providers: Providers,
+    registry: SharedModelRegistry,
 ) -> (StatusCode, Json<Value>) {
     // Validate provider
     let valid_provider = PROVIDERS.iter().any(|(id, _, _)| *id == provider);
     if !valid_provider {
         return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": { "message": format!("Unknown provider \"{}\"", provider), "type": "invalid_request_error", "code": "unknown_provider" }
+            "error": {
+                "message": format!("Unknown provider \"{}\"", provider),
+                "type": "invalid_request_error",
+                "code": "unknown_provider"
+            }
         })));
     }
 
@@ -63,27 +77,43 @@ pub async fn push_session_handler(
         Some(k) => k,
         None => {
             return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
-                "error": { "message": "Server is not configured to accept session pushes (POLYCHAT_API_KEY not set)", "type": "configuration_error", "code": "no_api_key" }
+                "error": {
+                    "message": "Server is not configured to accept session pushes (POLYCHAT_API_KEY not set)",
+                    "type": "configuration_error",
+                    "code": "no_api_key"
+                }
             })));
         }
     };
 
     if !check_rate_limit(&api_key) {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
-            "error": { "message": "Too many session pushes. Maximum 5 per hour.", "type": "rate_limit_error", "code": "session_push_rate_limited" }
+            "error": {
+                "message": "Too many session pushes. Maximum 5 per hour.",
+                "type": "rate_limit_error",
+                "code": "session_push_rate_limited"
+            }
         })));
     }
 
     // Validate envelope
     if envelope.v != 1 {
         return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": { "message": "Invalid envelope format. Expected v1 transport envelope.", "type": "invalid_request_error", "code": "invalid_envelope" }
+            "error": {
+                "message": "Invalid envelope format. Expected v1 transport envelope.",
+                "type": "invalid_request_error",
+                "code": "invalid_envelope"
+            }
         })));
     }
 
     if envelope.provider != provider {
         return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": { "message": format!("Envelope provider \"{}\" does not match URL provider \"{}\"", envelope.provider, provider), "type": "invalid_request_error", "code": "provider_mismatch" }
+            "error": {
+                "message": format!("Envelope provider \"{}\" does not match URL provider \"{}\"", envelope.provider, provider),
+                "type": "invalid_request_error",
+                "code": "provider_mismatch"
+            }
         })));
     }
 
@@ -92,7 +122,11 @@ pub async fn push_session_handler(
         let age = chrono::Utc::now() - created.with_timezone(&chrono::Utc);
         if age.num_seconds() > 3600 {
             return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": { "message": "Envelope has expired. Generate a new one with polychat session push.", "type": "invalid_request_error", "code": "envelope_expired" }
+                "error": {
+                    "message": "Envelope has expired. Generate a new one with polychat session push.",
+                    "type": "invalid_request_error",
+                    "code": "envelope_expired"
+                }
             })));
         }
     }
@@ -101,7 +135,11 @@ pub async fn push_session_handler(
         Ok(c) => c,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": { "message": format!("Failed to load config: {}", e), "type": "server_error", "code": "config_error" }
+                "error": {
+                    "message": format!("Failed to load config: {}", e),
+                    "type": "server_error",
+                    "code": "config_error"
+                }
             })));
         }
     };
@@ -111,7 +149,11 @@ pub async fn push_session_handler(
         Ok(j) => j,
         Err(_) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": { "message": "Failed to decrypt session envelope. Check that --api-key matches the server's POLYCHAT_API_KEY.", "type": "invalid_request_error", "code": "decryption_failed" }
+                "error": {
+                    "message": "Failed to decrypt session envelope. Check that --api-key matches the server's POLYCHAT_API_KEY.",
+                    "type": "invalid_request_error",
+                    "code": "decryption_failed"
+                }
             })));
         }
     };
@@ -121,7 +163,11 @@ pub async fn push_session_handler(
         Ok(v) => v,
         Err(_) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": { "message": "Session payload is not valid JSON.", "type": "invalid_request_error", "code": "invalid_session_json" }
+                "error": {
+                    "message": "Session payload is not valid JSON.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_session_json"
+                }
             })));
         }
     };
@@ -132,7 +178,11 @@ pub async fn push_session_handler(
 
     if !has_cookies && !has_origins && !has_user_token {
         return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": { "message": "Session payload is empty. Log in first and then push the session.", "type": "invalid_request_error", "code": "empty_session" }
+            "error": {
+                "message": "Session payload is empty. Log in first and then push the session.",
+                "type": "invalid_request_error",
+                "code": "empty_session"
+            }
         })));
     }
 
@@ -140,9 +190,22 @@ pub async fn push_session_handler(
     normalize_storage_state(&mut session);
     if let Err(e) = save_session(&provider, &session) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": { "message": format!("Failed to store session: {}", e), "type": "server_error", "code": "session_store_failed" }
+            "error": {
+                "message": format!("Failed to store session: {}", e),
+                "type": "server_error",
+                "code": "session_store_failed"
+            }
         })));
     }
+
+    // Refresh the model registry to pick up the newly connected provider
+    let new_registry = ModelRegistry::build(&providers).await;
+    let new_count = new_registry.len();
+    {
+        let mut guard = registry.write().await;
+        *guard = new_registry;
+    }
+    tracing::info!("Model registry refreshed after session push: {} models", new_count);
 
     (StatusCode::OK, Json(json!({
         "provider": provider,
@@ -157,13 +220,21 @@ pub async fn delete_session_handler(
     let valid_provider = PROVIDERS.iter().any(|(id, _, _)| *id == provider);
     if !valid_provider {
         return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": { "message": format!("Unknown provider \"{}\"", provider), "type": "invalid_request_error", "code": "unknown_provider" }
+            "error": {
+                "message": format!("Unknown provider \"{}\"", provider),
+                "type": "invalid_request_error",
+                "code": "unknown_provider"
+            }
         })));
     }
 
     if !has_session(&provider) {
         return (StatusCode::NOT_FOUND, Json(json!({
-            "error": { "message": format!("No session found for \"{}\"", provider), "type": "not_found_error", "code": "session_not_found" }
+            "error": {
+                "message": format!("No session found for \"{}\"", provider),
+                "type": "not_found_error",
+                "code": "session_not_found"
+            }
         })));
     }
 

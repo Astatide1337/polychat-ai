@@ -1,75 +1,7 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::time::{Duration, timeout};
-
 use crate::model_aliases::model_matches;
-use crate::providers::{ModelInfo, Provider};
-use crate::session::has_session;
+use crate::providers::ModelInfo;
 
-pub type Providers = Arc<HashMap<String, Arc<dyn Provider>>>;
-
-pub async fn list_connected_models(providers: &Providers, timeout_secs: u64) -> Vec<ModelInfo> {
-    let mut all_models = Vec::new();
-
-    for (provider_id, provider) in providers.iter() {
-        if !has_session(provider_id) {
-            continue;
-        }
-
-        let models = match timeout(Duration::from_secs(timeout_secs), provider.list_models()).await {
-            Ok(Ok(models)) => models,
-            _ => continue,
-        };
-
-        all_models.extend(models);
-    }
-
-    all_models
-}
-
-pub async fn find_provider_for_model(
-    model: &str,
-    providers: &Providers,
-    timeout_secs: u64,
-) -> Option<(Arc<dyn Provider>, String)> {
-    for (provider_id, provider) in providers.iter() {
-        if !has_session(provider_id) {
-            continue;
-        }
-
-        let models = match timeout(Duration::from_secs(timeout_secs), provider.list_models()).await {
-            Ok(Ok(models)) => models,
-            _ => continue,
-        };
-
-        if models.iter().any(|m| model_matches(model, &m.id)) {
-            return Some((provider.clone(), provider_id.clone()));
-        }
-    }
-
-    None
-}
-
-pub async fn find_model(model_id: &str, providers: &Providers, timeout_secs: u64) -> Option<ModelInfo> {
-    for (provider_id, provider) in providers.iter() {
-        if !has_session(provider_id) {
-            continue;
-        }
-
-        let models = match timeout(Duration::from_secs(timeout_secs), provider.list_models()).await {
-            Ok(Ok(models)) => models,
-            _ => continue,
-        };
-
-        if let Some(model) = find_matching_model(model_id, &models) {
-            return Some(model);
-        }
-    }
-
-    None
-}
-
+#[allow(dead_code)]
 fn find_matching_model(model_id: &str, models: &[ModelInfo]) -> Option<ModelInfo> {
     models.iter().find(|m| model_matches(model_id, &m.id)).cloned()
 }

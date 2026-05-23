@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::config::PolychatConfig;
 use crate::providers::{ChatChunk, ChatMessage, ChatOptions};
 use crate::routes::errors::RouteError;
-use crate::routes::resolver::{Providers, find_provider_for_model};
+use crate::router::{Providers, SharedModelRegistry};
 
 #[derive(Deserialize)]
 pub struct GenerateRequest {
@@ -28,8 +28,9 @@ pub struct GenerateRequest {
 
 pub async fn generate_handler(
     Json(body): Json<GenerateRequest>,
-    providers: Providers,
+    _providers: Providers,
     config: std::sync::Arc<PolychatConfig>,
+    registry: SharedModelRegistry,
 ) -> impl IntoResponse {
     let mut messages = Vec::new();
     if let Some(system) = &body.system {
@@ -45,15 +46,18 @@ pub async fn generate_handler(
         tool_call_id: None,
     });
 
-    let (provider, provider_id) = match find_provider_for_model(&body.model, &providers, 15).await {
-        Some((provider, provider_id)) => (provider, provider_id),
-        None => {
-            return RouteError::new(
-                StatusCode::NOT_FOUND,
-                format!("Model '{}' not found", body.model),
-                "invalid_request_error",
-                "model_not_found",
-            ).into_response();
+    let (provider, provider_id) = {
+        let reg = registry.read().await;
+        match reg.find_provider(&body.model) {
+            Some((provider, provider_id)) => (provider, provider_id),
+            None => {
+                return RouteError::new(
+                    StatusCode::NOT_FOUND,
+                    format!("Model '{}' not found", body.model),
+                    "invalid_request_error",
+                    "model_not_found",
+                ).into_response();
+            }
         }
     };
 

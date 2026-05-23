@@ -4,12 +4,11 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
-use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::PolychatConfig;
-use crate::providers::{ChatOptions, Provider, ToolCallStrategy};
+use crate::providers::{ChatOptions, ToolCallStrategy};
 pub use crate::routes::completion_messages::CompletionRequest;
 use crate::routes::completion_messages::{
     completion_messages_to_provider_messages, has_tool_transcript,
@@ -18,7 +17,7 @@ use crate::routes::emulated_completion::emulated_completion_response;
 use crate::routes::conversation_tracker::{TRACKER, tracked_conversation_id};
 use crate::routes::errors::RouteError;
 use crate::routes::openai_format::{non_stream_response, stream_response};
-use crate::routes::resolver::find_provider_for_model;
+use crate::router::SharedModelRegistry;
 use crate::tools::inject::inject_tools;
 
 fn temporary_conversation_source(temporary: bool, explicit: bool, tracked: bool) -> &'static str {
@@ -39,8 +38,8 @@ fn error_response(status: StatusCode, message: &str, err_type: &'static str, cod
 
 pub async fn completions_handler(
     Json(body): Json<CompletionRequest>,
-    providers: Arc<HashMap<String, Arc<dyn Provider>>>,
     config: Arc<PolychatConfig>,
+    registry: SharedModelRegistry,
 ) -> impl IntoResponse {
     let model = &body.model;
     if model.is_empty() {
@@ -52,7 +51,10 @@ pub async fn completions_handler(
         ).into_response();
     }
 
-    let resolved = find_provider_for_model(model, &providers, 15).await;
+    let resolved = {
+        let reg = registry.read().await;
+        reg.find_provider(model)
+    };
     let (provider, provider_id) = match resolved {
         Some(r) => r,
         None => {
