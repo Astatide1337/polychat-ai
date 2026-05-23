@@ -109,7 +109,8 @@ async fn main() {
 
     let providers = Arc::new(provider_map);
     let config = Arc::new(config);
-    let app = router::build_router(providers, config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let app = router::build_router(providers, config, shutdown_tx);
 
     let addr = format!("{}:{}", host, port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -127,10 +128,14 @@ async fn main() {
     tracing::info!("Polychat server running at http://{}:{}", host, port);
 
     let shutdown_signal = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for ctrl+c");
-        tracing::info!("Shutting down...");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Shutting down (SIGINT)...");
+            }
+            _ = shutdown_rx => {
+                tracing::info!("Shutting down (POST /shutdown)...");
+            }
+        }
     };
 
     axum::serve(listener, app)

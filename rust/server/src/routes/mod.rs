@@ -10,3 +10,4 @@ pub mod sessions;
 pub mod generate;
 pub mod openai_format;
 pub mod resolver;
+pub mod shutdown;

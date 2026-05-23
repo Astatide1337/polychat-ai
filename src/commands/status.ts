@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { loadConfig, PROVIDERS } from "../config/index.js";
 import { hasSession } from "../session/store.js";
 import { isServerRunning } from "../utils/binary.js";
+import { getDaemonStatus, type DaemonPlatform } from "../daemon/mod.js";
 
 export function registerStatusCommand(program: Command) {
   program
@@ -11,28 +12,70 @@ export function registerStatusCommand(program: Command) {
     .option("--check", "Validate sessions via the running server's /health endpoint")
     .action(async (options: { check?: boolean }) => {
       const config = loadConfig();
-      const serverUrl = process.env.POLYCHAT_SERVER_URL ?? `http://${config.server.host}:${config.server.port}`;
-      const rows = [] as Array<{ provider: string; status: string; defaultModel: string; session: string }>;
+      const serverUrl =
+        process.env.POLYCHAT_SERVER_URL ??
+        `http://${config.server.host}:${config.server.port}`;
+
+      // Daemon and server status line
+      const daemonStatus = getDaemonStatus();
+      const serverAlive = await isServerRunning(serverUrl);
+      const daemonParts: string[] = [];
+      if (daemonStatus.installed) {
+        if (daemonStatus.binaryValid) {
+          daemonParts.push(
+            `Daemon: ${chalk.green(`installed (${platformLabel(daemonStatus.installed)})`)}`,
+          );
+        } else {
+          daemonParts.push(
+            `Daemon: ${chalk.red(`broken (binary not found at ${daemonStatus.binaryPath})`)}`,
+          );
+        }
+      } else {
+        daemonParts.push(`Daemon: ${chalk.yellow("not installed")}`);
+      }
+      if (serverAlive) {
+        daemonParts.push(`Server: ${chalk.green(`running on ${serverUrl}`)}`);
+      } else {
+        daemonParts.push(`Server: ${chalk.red("not running")}`);
+      }
+      console.log(daemonParts.join(" | "));
+      console.log();
+
+      const rows = [] as Array<{
+        provider: string;
+        status: string;
+        defaultModel: string;
+        session: string;
+      }>;
 
       // Optionally fetch live health from the server
       let serverHealth: Record<string, { connected?: boolean; session_valid?: boolean }> = {};
       if (options.check) {
-        if (await isServerRunning(serverUrl)) {
+        if (serverAlive) {
           try {
-            const res = await fetch(`${serverUrl}/health`, { signal: AbortSignal.timeout(5_000) });
-            const body = await res.json() as { providers?: Record<string, { connected?: boolean; session_valid?: boolean }> };
+            const res = await fetch(`${serverUrl}/health`, {
+              signal: AbortSignal.timeout(5_000),
+            });
+            const body = (await res.json()) as {
+              providers?: Record<string, { connected?: boolean; session_valid?: boolean }>;
+            };
             serverHealth = body.providers ?? {};
-          } catch { /* fall through — show local status only */ }
+          } catch {
+            /* fall through — show local status only */
+          }
         } else {
-          console.warn(`⚠ Server not running at ${serverUrl} — showing local session status only.`);
+          console.warn(
+            `⚠ Server not running at ${serverUrl} — showing local session status only.`,
+          );
         }
       }
 
       for (const [key, provider] of Object.entries(PROVIDERS)) {
         const hasSessionFile = hasSession(key);
         const defaultModel = config.providers[key]?.defaultModel ?? provider.defaultModel;
-        const statusLabel = hasSessionFile ? chalk.green("✓ Connected") : chalk.red("✗ Disconnected");
-
+        const statusLabel = hasSessionFile
+          ? chalk.green("✓ Connected")
+          : chalk.red("✗ Disconnected");
         let session = "—";
         if (options.check && hasSessionFile) {
           const liveInfo = serverHealth[key];
@@ -42,15 +85,23 @@ export function registerStatusCommand(program: Command) {
             session = chalk.yellow("Unknown");
           }
         }
-
         rows.push({ provider: provider.name, status: statusLabel, defaultModel, session });
       }
 
       const widths = {
-        provider: Math.max("Provider".length, ...rows.map((row) => stripAnsi(row.provider).length)),
+        provider: Math.max(
+          "Provider".length,
+          ...rows.map((row) => stripAnsi(row.provider).length),
+        ),
         status: Math.max("Status".length, ...rows.map((row) => stripAnsi(row.status).length)),
-        defaultModel: Math.max("Default Model".length, ...rows.map((row) => stripAnsi(row.defaultModel).length)),
-        session: Math.max("Session".length, ...rows.map((row) => stripAnsi(row.session).length)),
+        defaultModel: Math.max(
+          "Default Model".length,
+          ...rows.map((row) => stripAnsi(row.defaultModel).length),
+        ),
+        session: Math.max(
+          "Session".length,
+          ...rows.map((row) => stripAnsi(row.session).length),
+        ),
       };
 
       const header = [
@@ -58,17 +109,21 @@ export function registerStatusCommand(program: Command) {
         pad("Status", widths.status),
         pad("Default Model", widths.defaultModel),
         pad("Session", widths.session),
-      ].join("  ");
+      ].join(" ");
+
       const separator = "─".repeat(stripAnsi(header).length);
+
       console.log(header);
       console.log(separator);
       for (const row of rows) {
-        console.log([
-          pad(row.provider, widths.provider),
-          pad(row.status, widths.status),
-          pad(row.defaultModel, widths.defaultModel),
-          pad(row.session, widths.session),
-        ].join("  "));
+        console.log(
+          [
+            pad(row.provider, widths.provider),
+            pad(row.status, widths.status),
+            pad(row.defaultModel, widths.defaultModel),
+            pad(row.session, widths.session),
+          ].join(" "),
+        );
       }
     });
 }
@@ -79,4 +134,15 @@ function pad(value: string, width: number) {
 
 function stripAnsi(value: string) {
   return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function platformLabel(platform: DaemonPlatform): string {
+  switch (platform) {
+    case "systemd":
+      return "systemd";
+    case "launchd":
+      return "launchd";
+    case "startup":
+      return "Windows Startup";
+  }
 }

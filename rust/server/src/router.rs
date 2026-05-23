@@ -3,8 +3,9 @@
 use axum::Router;
 use axum::routing::{get, post, delete};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::oneshot::Sender;
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -12,8 +13,13 @@ use crate::auth::auth_middleware;
 use crate::config::PolychatConfig;
 use crate::providers::Provider;
 use crate::routes::*;
+use crate::routes::shutdown::ShutdownState;
 
-pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>, config: Arc<PolychatConfig>) -> Router {
+pub fn build_router(
+    providers: Arc<HashMap<String, Arc<dyn Provider>>>,
+    config: Arc<PolychatConfig>,
+    shutdown_tx: Sender<()>,
+) -> Router {
     let p_health = providers.clone();
     let p_models = providers.clone();
     let p_models_get = providers.clone();
@@ -53,6 +59,8 @@ pub fn build_router(providers: Arc<HashMap<String, Arc<dyn Provider>>>, config: 
             let c = c_generate.clone();
             async move { generate::generate_handler(body, p, c).await }
         }))
+        .route("/shutdown", post(shutdown::shutdown_handler))
+        .with_state(ShutdownState { tx: Arc::new(Mutex::new(Some(shutdown_tx))) })
         .layer(axum::middleware::from_fn(auth_middleware))
         .layer(TimeoutLayer::new(Duration::from_secs(120)))
         .layer(CorsLayer::permissive())
