@@ -29,11 +29,7 @@
   "tdd": {
     "phase": "idle",
     "testFiles": [],
-    "sourceFiles": [
-      "/home/sohamb/Desktop/polychat/rust/server/src/providers/sse.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/providers/mod.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/providers/claude.rs"
-    ],
+    "sourceFiles": [],
     "redVerificationPending": false
   },
   "debug": {
