@@ -1,23 +1,512 @@
 use std::sync::Arc;
-
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use futures::StreamExt;
 use serde_json::Value;
-
-use crate::providers::{ChatChunk, ChatMessage, ChatOptions, Provider};
-use crate::routes::completion_messages::{CompletionRequest, latest_user_text};
+use crate::providers::{ChatMessage, ChatOptions, Provider};
+use crate::routes::completion_messages::CompletionRequest;
 use crate::routes::conversation_tracker::TRACKER;
 use crate::routes::errors::RouteError;
 use crate::routes::openai_format::{
-    emulated_stream_text_response, emulated_stream_tool_call_response, event_stream_response,
-    format_sse_chunk, text_completion_response, tool_call_completion_response, StreamDelta,
+    emulated_stream_text_response,
+    emulated_stream_tool_call_response,
+    event_stream_response,
+    format_sse_chunk,
+    text_completion_response,
+    tool_call_completion_response,
+    StreamDelta,
 };
 use crate::tools::emulated::{
-    EmulatedToolResult, StreamingEmulatedParser, build_emulated_tool_prompt,
-    build_repair_prompt_with_context, parse_emulated_tool_response, validate_emulated_tool_call,
+    EmulatedToolResult,
+    build_emulated_tool_prompt,
+    build_repair_prompt_with_context,
+    parse_emulated_tool_response,
+    validate_emulated_tool_call,
 };
+
+// ---------------------------------------------------------------------------
+// Validator — validation heuristics for emulated completion responses
+// ---------------------------------------------------------------------------
+
+mod validator {
+    use serde_json::Value;
+    use crate::routes::completion_messages::{CompletionMessage, latest_user_text};
+    
+
+    /// Whether a failed emulated response should be retried.
+    pub fn should_retry_emulated_response(tool_choice: Option<&Value>, err: &str) -> bool {
+        match tool_choice {
+            Some(Value::String(choice)) if choice == "required" => true,
+            Some(Value::Object(_)) => true,
+            _ => err.contains("incorrectly denied having tool access")
+                || err.contains("explicitly requested the `")
+                || err.contains("attempted to show tool-call JSON inline")
+                || err.contains("returned a structured JSON payload")
+                || err.contains("claimed it already changed files"),
+        }
+    }
+
+    /// Whether the raw output looks like a structured JSON payload
+    /// (rather than a valid tool call block or plain final answer).
+    pub fn looks_like_structured_payload(raw_output: &str) -> bool {
+        let trimmed = raw_output.trim_start();
+        (trimmed.starts_with('{') || trimmed.starts_with("```json") || trimmed.starts_with("```"))
+            && (trimmed.contains("\"name\"")
+                || trimmed.contains("\"type\"")
+                || trimmed.contains("\"content\""))
+    }
+
+    /// Whether a plain-text response should be accepted as a final answer
+    /// despite not having a polychat block.
+    pub fn should_accept_plain_text_final(
+        tool_choice: Option<&Value>,
+        err: &str,
+        raw_output: &str,
+    ) -> bool {
+        if raw_output.trim().is_empty() || err != "response did not include a polychat block" {
+            return false;
+        }
+        if looks_like_structured_payload(raw_output) {
+            return false;
+        }
+        !matches!(
+            tool_choice,
+            Some(Value::String(choice)) if choice == "required"
+        ) && !matches!(tool_choice, Some(Value::Object(_)))
+    }
+
+    /// Whether there's a tool result message after the latest user message.
+    pub fn has_tool_result_after_latest_user(messages: &[CompletionMessage]) -> bool {
+        let last_user_idx = messages.iter().rposition(|msg| msg.role == "user");
+        let search_start = last_user_idx.map_or(0, |idx| idx + 1);
+        messages[search_start..].iter().any(|msg| msg.role == "tool")
+    }
+
+    /// Whether the content claims to have performed an external action
+    /// (file write, command execution, etc.) without using a tool call.
+    pub fn final_answer_claims_external_action(content_lower: &str) -> bool {
+        let action_markers = [
+            "i wrote ",
+            "i can write ",
+            "i created ",
+            "i can create ",
+            "i saved ",
+            "i can save ",
+            "i updated ",
+            "i opened ",
+            "i ran ",
+            "i can run ",
+            "i executed ",
+            "spec written to ",
+            "written to ~/",
+            "written to /",
+            "saved to ~/",
+            "saved to /",
+            "created at ~/",
+            "created at /",
+            "ready for: /go ",
+        ];
+        action_markers.iter().any(|marker| content_lower.contains(marker))
+    }
+
+    /// Whether the content contains inline tool-call JSON that should have
+    /// been returned as a proper tool call block.
+    pub fn final_answer_contains_inline_tool_call_json(content: &str) -> bool {
+        let lower = content.to_lowercase();
+        (lower.contains("\"name\"") && lower.contains("\"arguments\""))
+            || (lower.contains("<polychat_tool_call>") && !lower.contains("</polychat_tool_call>"))
+    }
+
+    /// Normalize text for validation comparisons (lowercase, smart quotes, etc.).
+    pub fn normalize_validation_text(content: &str) -> String {
+        content
+            .to_lowercase()
+            .replace(['\u{2019}', '`'], "'")
+            .replace('\u{201c}', "\"")
+            .replace('\u{201d}', "\"")
+    }
+
+    /// Whether any tools in the list have a `function` key.
+    pub fn has_any_tool(tools: &[Value]) -> bool {
+        tools.iter().any(|tool| tool.get("function").is_some())
+    }
+
+    /// Whether the model is asking for permission to use a safe tool
+    /// instead of just using it.
+    pub fn final_answer_seeks_permission_for_safe_tool_use(
+        content_lower: &str,
+        tools: &[Value],
+    ) -> bool {
+        if !has_any_tool(tools) {
+            return false;
+        }
+        let asks_permission = [
+            "can you confirm if i should",
+            "can i proceed",
+            "should i read",
+            "should i inspect",
+            "should i check",
+            "should i look at",
+            "should i use the read tool",
+            "should i use the grep tool",
+            "should i use the glob tool",
+            "do you want me to do that",
+            "if you want, i can",
+            "i can instead read",
+        ]
+        .iter()
+        .any(|phrase| content_lower.contains(phrase));
+
+        if !asks_permission {
+            return false;
+        }
+        [
+            "read",
+            "inspect",
+            "check",
+            "look at",
+            "package.json",
+            "directory",
+            "repo",
+            "files",
+            "src/commands",
+        ]
+        .iter()
+        .any(|hint| content_lower.contains(hint))
+    }
+
+    /// Whether the model is asking the user to provide inspectable local
+    /// inputs that could be obtained with an available safe tool.
+    pub fn final_answer_requests_user_supplied_local_inputs(
+        content_lower: &str,
+        tools: &[Value],
+    ) -> bool {
+        if !has_any_tool(tools) {
+            return false;
+        }
+        let asks_user_to_supply = [
+            "could you share",
+            "you can provide",
+            "provide the 'package.json'",
+            "provide the package.json",
+            "copy-paste the 'package.json'",
+            "copy-paste the package.json",
+            "you'll need to provide access",
+            "you will need to provide access",
+            "provide a listing of",
+        ]
+        .iter()
+        .any(|phrase| content_lower.contains(phrase));
+
+        if !asks_user_to_supply {
+            return false;
+        }
+        [
+            "package.json",
+            "src/commands",
+            "listing",
+            "repo",
+            "files",
+            "directory",
+        ]
+        .iter()
+        .any(|hint| content_lower.contains(hint))
+    }
+
+    /// Whether a final-answer response should be retried because it should
+    /// have been a tool call instead. Returns `Some(error_message)` if
+    /// retry is warranted.
+    pub fn final_answer_requires_tool_retry(
+        body: &crate::routes::completion_messages::CompletionRequest,
+        tools: &[Value],
+        content: &str,
+    ) -> Option<String> {
+        match body.tool_choice.as_ref() {
+            Some(Value::String(choice)) if choice == "required" => {
+                return Some("tool choice was `required`, but the model answered directly".into());
+            }
+            Some(Value::Object(obj)) => {
+                if let Some(name) = obj
+                    .get("function")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Some(format!(
+                        "tool choice required `{}`, but the model answered directly",
+                        name
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        let content_lower = normalize_validation_text(content);
+
+        if content_lower.contains("don't have access")
+            || content_lower.contains("do not have access")
+            || content_lower.contains("don't have permission")
+            || content_lower.contains("do not have permission")
+            || content_lower.contains("cannot run")
+            || content_lower.contains("can't run")
+            || content_lower.contains("i'm a text-based ai")
+        {
+            return Some("the model incorrectly denied having tool access".into());
+        }
+
+        if final_answer_claims_external_action(&content_lower) {
+            if has_tool_result_after_latest_user(&body.messages) {
+                return None;
+            }
+            return Some(
+                "the model claimed it already changed files, ran commands, or completed another external action without using a tool call".into(),
+            );
+        }
+
+        if final_answer_contains_inline_tool_call_json(content) {
+            return Some(
+                "the model attempted to show tool-call JSON inline instead of returning a clean tool call or final answer block".into(),
+            );
+        }
+
+        if final_answer_seeks_permission_for_safe_tool_use(&content_lower, tools) {
+            return Some(
+                "the model asked for permission to use an available safe tool instead of using it directly".into(),
+            );
+        }
+
+        if final_answer_requests_user_supplied_local_inputs(&content_lower, tools) {
+            return Some(
+                "the model asked the user to provide inspectable local inputs instead of using an available safe tool".into(),
+            );
+        }
+
+        if let Some(name) = explicit_tool_request(body, tools) {
+            if has_tool_result_after_latest_user(&body.messages) {
+                return None;
+            }
+            return Some(format!(
+                "the user explicitly requested the `{}` tool, but the model answered directly",
+                name
+            ));
+        }
+
+        None
+    }
+
+    /// Detect explicit tool requests in user message text.
+    pub fn explicit_tool_request(
+        body: &crate::routes::completion_messages::CompletionRequest,
+        tools: &[Value],
+    ) -> Option<String> {
+        let user_text = latest_user_text(&body.messages)?;
+        let user_lower = user_text.to_lowercase();
+        for tool in tools {
+            if let Some(name) = tool
+                .get("function")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                let tool_name = name.to_lowercase();
+                if user_lower.contains(&format!("use the {} tool", tool_name))
+                    || user_lower.contains(&format!("use the `{}` tool", tool_name))
+                    || user_lower.contains(&format!("use {} tool", tool_name))
+                    || user_lower.contains(&format!("use {} to ", tool_name))
+                    || user_lower.contains(&format!("call the {} tool", tool_name))
+                    || user_lower.contains(&format!("call {} with ", tool_name))
+                    || user_lower.contains(&format!("run the {} tool", tool_name))
+                    || user_lower.contains(&format!("invoke the {} tool", tool_name))
+                {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an emulated tool name — if empty, infer from tool_choice or
+    /// single available tool.
+    pub fn resolve_emulated_tool_name(
+        name: &str,
+        tools: &[Value],
+        tool_choice: Option<&Value>,
+    ) -> Result<String, String> {
+        if !name.is_empty() {
+            return Ok(name.to_string());
+        }
+        if let Some(Value::Object(obj)) = tool_choice {
+            if let Some(name) = obj
+                .get("function")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                return Ok(name.to_string());
+            }
+        }
+        let mut names = tools.iter().filter_map(|tool| {
+            tool.get("function")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+        let first = names
+            .next()
+            .ok_or_else(|| "tool call omitted a name and no tools were available".to_string())?;
+        if names.next().is_none() {
+            Ok(first)
+        } else {
+            Err("tool call omitted a name and multiple tools were available".into())
+        }
+    }
+
+    /// Check whether the user's latest message explicitly requests a tool
+    /// (for the purpose of deciding whether incremental streaming is OK).
+    pub fn should_stream_emulated_incrementally(
+        body: &crate::routes::completion_messages::CompletionRequest,
+        tools: &[Value],
+    ) -> bool {
+        match body.tool_choice.as_ref() {
+            Some(Value::String(choice)) if choice == "required" => return false,
+            Some(Value::Object(_)) => return false,
+            _ => {}
+        }
+        explicit_tool_request(body, tools).is_none()
+    }
+}
+
+// Re-export validator functions used by the main module
+use validator::{
+    final_answer_requires_tool_retry,
+    looks_like_structured_payload,
+    resolve_emulated_tool_name,
+    should_accept_plain_text_final,
+    should_retry_emulated_response,
+    should_stream_emulated_incrementally,
+};
+
+// ---------------------------------------------------------------------------
+// EmulatedSink — abstraction over streaming vs collecting output
+// ---------------------------------------------------------------------------
+
+mod sink {
+    use crate::providers::{ChatChunk, ChunkStream};
+    use crate::routes::openai_format::{format_sse_chunk, StreamDelta};
+    use tokio::sync::mpsc;
+    use futures::StreamExt;
+    use crate::tools::emulated::StreamingEmulatedParser;
+
+    /// A sink that absorbs emulated completion output.
+    /// The non-streaming path collects everything; the streaming path
+    /// sends SSE chunks in real-time.
+    pub trait EmulatedSink {
+        /// Consume a provider stream and return the raw output text.
+        /// The sink may emit chunks to the client as it processes them.
+        async fn consume_stream(&mut self, stream: ChunkStream) -> String;
+
+        /// Whether the sink can retry (i.e., hasn't already sent data
+        /// to the client that can't be un-sent).
+        fn can_retry(&self) -> bool;
+    }
+
+    /// Collects output into a string (non-streaming path).
+    pub struct CollectingSink;
+
+    impl EmulatedSink for CollectingSink {
+        async fn consume_stream(&mut self, mut chunk_stream: ChunkStream) -> String {
+            let mut output = String::new();
+            while let Some(result) = chunk_stream.next().await {
+                match result {
+                    Ok(ChatChunk::Content(text)) => output.push_str(&text),
+                    Ok(ChatChunk::Thinking(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            output
+        }
+
+        fn can_retry(&self) -> bool {
+            true // Non-streaming always can retry — nothing sent yet
+        }
+    }
+
+    /// Sends output as SSE chunks through a channel (streaming path).
+    pub struct StreamingSink {
+        tx: mpsc::Sender<Result<String, std::io::Error>>,
+        request_id: String,
+        model: String,
+        streamed_any: bool,
+    }
+
+    impl StreamingSink {
+        pub fn new(
+            tx: mpsc::Sender<Result<String, std::io::Error>>,
+            request_id: String,
+            model: String,
+        ) -> Self {
+            Self {
+                tx,
+                request_id,
+                model,
+                streamed_any: false,
+            }
+        }
+    }
+
+    impl EmulatedSink for StreamingSink {
+        async fn consume_stream(&mut self, mut chunk_stream: ChunkStream) -> String {
+            let mut parser = StreamingEmulatedParser::new();
+            while let Some(result) = chunk_stream.next().await {
+                match result {
+                    Ok(ChatChunk::Content(text)) => {
+                        for chunk in parser.feed(&text) {
+                            self.streamed_any = true;
+                            let _ = self
+                                .tx
+                                .send(Ok(format_sse_chunk(
+                                    &self.request_id,
+                                    &self.model,
+                                    StreamDelta {
+                                        content: Some(chunk),
+                                        ..Default::default()
+                                    },
+                                    None,
+                                )))
+                                .await;
+                        }
+                    }
+                    Ok(ChatChunk::Thinking(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            parser.raw_output().to_string()
+        }
+
+        fn can_retry(&self) -> bool {
+            !self.streamed_any
+        }
+    }
+}
+
+use sink::EmulatedSink;
+
+// ---------------------------------------------------------------------------
+// Unified outcome type
+// ---------------------------------------------------------------------------
+
+enum EmulatedOutcome {
+    Final {
+        content: String,
+        conversation_id: Option<String>,
+    },
+    ToolCall {
+        name: String,
+        arguments: String,
+        conversation_id: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
 
 fn should_store_emulated_tracker(temporary: bool) -> bool {
     !temporary
@@ -47,7 +536,6 @@ fn parse_rendered_tool_call(content: &str) -> Option<(String, String, String)> {
         .rev()
         .find(|line| line.trim_start().starts_with("Tool call "))?
         .trim();
-
     let rest = line.strip_prefix("Tool call ")?;
     let (call_id, remainder) = rest.split_once(": ")?;
     let open = remainder.find('(')?;
@@ -55,7 +543,6 @@ fn parse_rendered_tool_call(content: &str) -> Option<(String, String, String)> {
     if close <= open {
         return None;
     }
-
     Some((
         call_id.to_string(),
         remainder[..open].to_string(),
@@ -66,7 +553,6 @@ fn parse_rendered_tool_call(content: &str) -> Option<(String, String, String)> {
 fn latest_completed_tool_call(messages: &[ChatMessage]) -> Option<(String, String, String)> {
     let latest_tool = messages.iter().rev().find(|msg| msg.role == "tool")?;
     let tool_call_id = latest_tool.tool_call_id.as_deref()?;
-
     messages
         .iter()
         .rev()
@@ -82,8 +568,7 @@ fn is_exact_consecutive_duplicate_tool_call(
 ) -> bool {
     latest_completed_tool_call(messages)
         .map(|(_, previous_name, previous_arguments)| {
-            previous_name == name
-                && previous_arguments == normalize_tool_arguments(arguments)
+            previous_name == name && previous_arguments == normalize_tool_arguments(arguments)
         })
         .unwrap_or(false)
 }
@@ -101,164 +586,350 @@ fn format_tool_result_message(tool_call_id: Option<&str>, content: &str) -> Stri
     format!("[tool_result]\ncall_id: {}\ncontent:\n{}", call_id, content)
 }
 
-fn should_retry_emulated_response(tool_choice: Option<&Value>, err: &str) -> bool {
-    match tool_choice {
-        Some(Value::String(choice)) if choice == "required" => true,
-        Some(Value::Object(_)) => true,
-        _ => err.contains("incorrectly denied having tool access")
-            || err.contains("explicitly requested the `")
-            || err.contains("attempted to show tool-call JSON inline")
-            || err.contains("returned a structured JSON payload")
-            || err.contains("claimed it already changed files"),
+// ---------------------------------------------------------------------------
+// Unified emulated completion loop
+// ---------------------------------------------------------------------------
+
+fn append_repair_turn(
+    working_messages: &mut Vec<ChatMessage>,
+    raw_output: String,
+    err: &str,
+    tools: &[Value],
+    tool_choice: Option<&Value>,
+) {
+    working_messages.push(ChatMessage {
+        role: "assistant".into(),
+        content: raw_output,
+        tool_call_id: None,
+    });
+    working_messages.push(ChatMessage {
+        role: "user".into(),
+        content: build_repair_prompt_with_context(err, tools, tool_choice),
+        tool_call_id: None,
+    });
+}
+
+fn inject_emulated_tool_prompt(
+    messages: &[ChatMessage],
+    tools: &[Value],
+    tool_choice: Option<&Value>,
+) -> Vec<ChatMessage> {
+    let prompt = build_emulated_tool_prompt(tools, tool_choice);
+    let mut result = Vec::new();
+    let mut injected_system = false;
+    for msg in messages {
+        if msg.role == "tool" {
+            result.push(ChatMessage {
+                role: "system".into(),
+                content: format_tool_result_message(msg.tool_call_id.as_deref(), &msg.content),
+                tool_call_id: None,
+            });
+        } else if msg.role == "system" && !injected_system {
+            result.push(ChatMessage {
+                role: "system".into(),
+                content: format!("{}\n\n{}", msg.content, prompt),
+                tool_call_id: None,
+            });
+            injected_system = true;
+        } else {
+            result.push(msg.clone());
+        }
     }
+    if !injected_system {
+        result.insert(
+            0,
+            ChatMessage {
+                role: "system".into(),
+                content: prompt,
+                tool_call_id: None,
+            },
+        );
+    }
+    result
 }
 
-fn looks_like_structured_payload(raw_output: &str) -> bool {
-    let trimmed = raw_output.trim_start();
-    (trimmed.starts_with('{') || trimmed.starts_with("```json") || trimmed.starts_with("```"))
-        && (trimmed.contains("\"name\"") || trimmed.contains("\"type\"") || trimmed.contains("\"content\""))
-}
+/// Unified emulated completion retry loop.
+///
+/// This function replaces both `run_emulated_completion` and
+/// `run_emulated_completion_streaming`. The sink abstracts over
+/// whether output is collected or streamed.
+async fn run_emulated_completion_loop<S: EmulatedSink>(
+    body: &CompletionRequest,
+    provider: Arc<dyn Provider>,
+    provider_id: &str,
+    provider_messages: Vec<ChatMessage>,
+    initial_conversation_id: Option<String>,
+    sink: &mut S,
+) -> Result<EmulatedOutcome, RouteError> {
+    let tools = body.tools.clone().unwrap_or_default();
+    let mut working_messages =
+        inject_emulated_tool_prompt(&provider_messages, &tools, body.tool_choice.as_ref());
+    let mut conversation_id = initial_conversation_id;
 
-fn should_accept_plain_text_final(tool_choice: Option<&Value>, err: &str, raw_output: &str) -> bool {
-    if raw_output.trim().is_empty() || err != "response did not include a polychat block" {
-        return false;
+    for attempt in 0..3 {
+        let provider_response = provider
+            .send_message(
+                &working_messages,
+                &body.model,
+                &ChatOptions {
+                    reasoning_effort: body.reasoning_effort.clone(),
+                    stream: body.stream,
+                    stop: body.stop.clone(),
+                    tools: Vec::new(),
+                    tool_choice: None,
+                    temporary: body.temporary,
+                },
+                conversation_id.as_deref(),
+            )
+            .await
+            .map_err(|e| RouteError {
+                status: StatusCode::BAD_GATEWAY,
+                message: e.to_string(),
+                err_type: "upstream_error",
+                code: "upstream_error",
+            })?;
+
+        conversation_id = next_emulated_conversation_id(
+            body.temporary,
+            conversation_id,
+            provider_response.conversation_id.clone(),
+        );
+
+        let raw_output = sink.consume_stream(provider_response.stream).await;
+
+        match parse_emulated_tool_response(&raw_output) {
+            Ok(EmulatedToolResult::Final(content)) => {
+                if let Some(err) = final_answer_requires_tool_retry(body, &tools, &content) {
+                    if sink.can_retry() && attempt < 2
+                        && should_retry_emulated_response(body.tool_choice.as_ref(), &err)
+                    {
+                        append_repair_turn(
+                            &mut working_messages,
+                            raw_output,
+                            &err,
+                            &tools,
+                            body.tool_choice.as_ref(),
+                        );
+                        continue;
+                    }
+                    return Err(RouteError {
+                        status: StatusCode::BAD_GATEWAY,
+                        message: format!(
+                            "{} emulated tool call final-answer validation failed after retries: {}",
+                            provider_id, err
+                        ),
+                        err_type: "upstream_error",
+                        code: "tool_call_invalid",
+                    });
+                }
+                return Ok(EmulatedOutcome::Final {
+                    content,
+                    conversation_id,
+                });
+            }
+            Ok(EmulatedToolResult::ToolCall { name, arguments }) => {
+                let resolved_name =
+                    match resolve_emulated_tool_name(&name, &tools, body.tool_choice.as_ref()) {
+                        Ok(name) => name,
+                        Err(err)
+                            if sink.can_retry()
+                                && attempt < 2
+                                && should_retry_emulated_response(
+                                    body.tool_choice.as_ref(),
+                                    &err,
+                                ) =>
+                        {
+                            append_repair_turn(
+                                &mut working_messages,
+                                raw_output,
+                                &err,
+                                &tools,
+                                body.tool_choice.as_ref(),
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            return Err(RouteError {
+                                status: StatusCode::BAD_GATEWAY,
+                                message: format!(
+                                    "{} emulated tool call name resolution failed after retries: {}",
+                                    provider_id, err
+                                ),
+                                err_type: "upstream_error",
+                                code: "tool_call_invalid",
+                            });
+                        }
+                    };
+
+                match validate_emulated_tool_call(
+                    &resolved_name,
+                    &arguments,
+                    &tools,
+                    body.tool_choice.as_ref(),
+                ) {
+                    Ok(()) => {
+                        if is_exact_consecutive_duplicate_tool_call(
+                            &provider_messages,
+                            &resolved_name,
+                            &arguments,
+                        ) {
+                            let err = duplicate_tool_call_error(&resolved_name, &arguments);
+                            if sink.can_retry() && attempt < 2 {
+                                append_repair_turn(
+                                    &mut working_messages,
+                                    raw_output,
+                                    &err,
+                                    &tools,
+                                    body.tool_choice.as_ref(),
+                                );
+                                continue;
+                            }
+                            return Err(RouteError {
+                                status: StatusCode::BAD_GATEWAY,
+                                message: format!(
+                                    "{} emulated tool call validation failed after retries: {}",
+                                    provider_id, err
+                                ),
+                                err_type: "upstream_error",
+                                code: "tool_call_invalid",
+                            });
+                        }
+                        return Ok(EmulatedOutcome::ToolCall {
+                            name: resolved_name,
+                            arguments,
+                            conversation_id,
+                        });
+                    }
+                    Err(err)
+                        if sink.can_retry()
+                            && attempt < 2
+                            && should_retry_emulated_response(
+                                body.tool_choice.as_ref(),
+                                &err,
+                            ) =>
+                    {
+                        append_repair_turn(
+                            &mut working_messages,
+                            raw_output,
+                            &err,
+                            &tools,
+                            body.tool_choice.as_ref(),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(RouteError {
+                            status: StatusCode::BAD_GATEWAY,
+                            message: format!(
+                                "{} emulated tool call validation failed after retries: {}",
+                                provider_id, err
+                            ),
+                            err_type: "upstream_error",
+                            code: "tool_call_invalid",
+                        });
+                    }
+                }
+            }
+            // Plain-text acceptance path
+            Err(err)
+                if sink.can_retry()
+                    && should_accept_plain_text_final(
+                        body.tool_choice.as_ref(),
+                        &err,
+                        &raw_output,
+                    ) =>
+            {
+                let content = raw_output.trim().to_string();
+                if let Some(retry_err) =
+                    final_answer_requires_tool_retry(body, &tools, &content)
+                {
+                    if attempt < 2
+                        && should_retry_emulated_response(
+                            body.tool_choice.as_ref(),
+                            &retry_err,
+                        )
+                    {
+                        append_repair_turn(
+                            &mut working_messages,
+                            raw_output,
+                            &retry_err,
+                            &tools,
+                            body.tool_choice.as_ref(),
+                        );
+                        continue;
+                    }
+                    return Err(RouteError {
+                        status: StatusCode::BAD_GATEWAY,
+                        message: format!(
+                            "{} emulated tool call final-answer validation failed after retries: {}",
+                            provider_id, retry_err
+                        ),
+                        err_type: "upstream_error",
+                        code: "tool_call_invalid",
+                    });
+                }
+                return Ok(EmulatedOutcome::Final {
+                    content,
+                    conversation_id,
+                });
+            }
+            // Structured payload retry path
+            Err(err)
+                if sink.can_retry()
+                    && attempt < 2
+                    && should_retry_emulated_response(body.tool_choice.as_ref(), &err) =>
+            {
+                append_repair_turn(
+                    &mut working_messages,
+                    raw_output,
+                    &err,
+                    &tools,
+                    body.tool_choice.as_ref(),
+                );
+                continue;
+            }
+            Err(err)
+                if sink.can_retry()
+                    && attempt < 2
+                    && err == "response did not include a polychat block"
+                    && looks_like_structured_payload(&raw_output) =>
+            {
+                let retry_err =
+                    "the model returned a structured JSON payload instead of a valid tool call block or plain final answer";
+                append_repair_turn(
+                    &mut working_messages,
+                    raw_output,
+                    retry_err,
+                    &tools,
+                    body.tool_choice.as_ref(),
+                );
+                continue;
+            }
+            Err(err) => {
+                return Err(RouteError {
+                    status: StatusCode::BAD_GATEWAY,
+                    message: format!(
+                        "{} emulated tool call parsing failed after retries: {}",
+                        provider_id, err
+                    ),
+                    err_type: "upstream_error",
+                    code: "tool_call_invalid",
+                });
+            }
+        }
     }
 
-    if looks_like_structured_payload(raw_output) {
-        return false;
-    }
-
-    !matches!(
-        tool_choice,
-        Some(Value::String(choice)) if choice == "required"
-    ) && !matches!(tool_choice, Some(Value::Object(_)))
+    Err(RouteError {
+        status: StatusCode::BAD_GATEWAY,
+        message: format!("{} emulated tool call loop exhausted", provider_id),
+        err_type: "upstream_error",
+        code: "tool_call_invalid",
+    })
 }
 
-fn has_tool_result_after_latest_user(messages: &[crate::routes::completion_messages::CompletionMessage]) -> bool {
-    let last_user_idx = messages.iter().rposition(|msg| msg.role == "user");
-    let search_start = last_user_idx.map_or(0, |idx| idx + 1);
-    messages[search_start..].iter().any(|msg| msg.role == "tool")
-}
-
-fn final_answer_claims_external_action(content_lower: &str) -> bool {
-    let action_markers = [
-        "i wrote ",
-        "i can write ",
-        "i created ",
-        "i can create ",
-        "i saved ",
-        "i can save ",
-        "i updated ",
-        "i opened ",
-        "i ran ",
-        "i can run ",
-        "i executed ",
-        "spec written to ",
-        "written to ~/",
-        "written to /",
-        "saved to ~/",
-        "saved to /",
-        "created at ~/",
-        "created at /",
-        "ready for: /go ",
-    ];
-
-    action_markers.iter().any(|marker| content_lower.contains(marker))
-}
-
-fn final_answer_contains_inline_tool_call_json(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    (lower.contains("\"name\"") && lower.contains("\"arguments\""))
-        || (lower.contains("<polychat_tool_call>") && !lower.contains("</polychat_tool_call>"))
-}
-
-fn normalize_validation_text(content: &str) -> String {
-    content
-        .to_lowercase()
-        .replace(['’', '`'], "'")
-        .replace("\u{201c}", "\"")
-        .replace("\u{201d}", "\"")
-}
-
-fn has_any_tool(tools: &[Value]) -> bool {
-    tools.iter().any(|tool| tool.get("function").is_some())
-}
-
-fn final_answer_seeks_permission_for_safe_tool_use(content_lower: &str, tools: &[Value]) -> bool {
-    if !has_any_tool(tools) {
-        return false;
-    }
-
-    let asks_permission = [
-        "can you confirm if i should",
-        "can i proceed",
-        "should i read",
-        "should i inspect",
-        "should i check",
-        "should i look at",
-        "should i use the read tool",
-        "should i use the grep tool",
-        "should i use the glob tool",
-        "do you want me to do that",
-        "if you want, i can",
-        "i can instead read",
-    ]
-    .iter()
-    .any(|phrase| content_lower.contains(phrase));
-
-    if !asks_permission {
-        return false;
-    }
-
-    [
-        "read",
-        "inspect",
-        "check",
-        "look at",
-        "package.json",
-        "directory",
-        "repo",
-        "files",
-        "src/commands",
-    ]
-    .iter()
-    .any(|hint| content_lower.contains(hint))
-}
-
-fn final_answer_requests_user_supplied_local_inputs(content_lower: &str, tools: &[Value]) -> bool {
-    if !has_any_tool(tools) {
-        return false;
-    }
-
-    let asks_user_to_supply = [
-        "could you share",
-        "you can provide",
-        "provide the 'package.json'",
-        "provide the package.json",
-        "copy-paste the 'package.json'",
-        "copy-paste the package.json",
-        "you'll need to provide access",
-        "you will need to provide access",
-        "provide a listing of",
-    ]
-    .iter()
-    .any(|phrase| content_lower.contains(phrase));
-
-    if !asks_user_to_supply {
-        return false;
-    }
-
-    [
-        "package.json",
-        "src/commands",
-        "listing",
-        "repo",
-        "files",
-        "directory",
-    ]
-    .iter()
-    .any(|hint| content_lower.contains(hint))
-}
+// ---------------------------------------------------------------------------
+// Public API — emulated completion entry point
+// ---------------------------------------------------------------------------
 
 pub async fn emulated_completion_response(
     body: &CompletionRequest,
@@ -268,7 +939,9 @@ pub async fn emulated_completion_response(
     initial_conversation_id: Option<String>,
     request_id: &str,
 ) -> axum::response::Response {
-    if body.stream && should_stream_emulated_incrementally(body, body.tools.as_deref().unwrap_or(&[])) {
+    if body.stream
+        && should_stream_emulated_incrementally(body, body.tools.as_deref().unwrap_or(&[]))
+    {
         return stream_emulated_completion_response(
             body.clone(),
             provider,
@@ -279,47 +952,49 @@ pub async fn emulated_completion_response(
         );
     }
 
-    match run_emulated_completion(
+    let mut sink = sink::CollectingSink;
+
+    match run_emulated_completion_loop(
         body,
         provider,
         &provider_id,
         provider_messages.clone(),
         initial_conversation_id,
+        &mut sink,
     )
     .await
     {
-        Ok(EmulatedCompletionOutcome::Final {
+        Ok(EmulatedOutcome::Final {
             content,
             conversation_id,
         }) => {
             if should_store_emulated_tracker(body.temporary) {
                 if let Some(cid) = conversation_id {
-                TRACKER.store(&provider_messages, &provider_id, cid);
+                    TRACKER.store(&provider_messages, &provider_id, cid);
                 }
             }
-
             if body.stream {
                 emulated_stream_text_response(request_id, &body.model, content).into_response()
             } else {
                 Json(text_completion_response(request_id, &body.model, content)).into_response()
             }
         }
-        Ok(EmulatedCompletionOutcome::ToolCall {
+        Ok(EmulatedOutcome::ToolCall {
             name,
             arguments,
             conversation_id,
         }) => {
             if should_store_emulated_tracker(body.temporary) {
                 if let Some(cid) = conversation_id {
-                TRACKER.store(&provider_messages, &provider_id, cid);
+                    TRACKER.store(&provider_messages, &provider_id, cid);
                 }
             }
-
             if body.stream {
                 emulated_stream_tool_call_response(request_id, &body.model, &name, &arguments)
                     .into_response()
             } else {
-                Json(tool_call_completion_response(request_id, &body.model, name, arguments)).into_response()
+                Json(tool_call_completion_response(request_id, &body.model, name, arguments))
+                    .into_response()
             }
         }
         Err(err) => err.into_response(),
@@ -350,19 +1025,30 @@ fn stream_emulated_completion_response(
             )))
             .await;
 
-        match run_emulated_completion_streaming(&body, provider, &provider_id, provider_messages.clone(), initial_conversation_id, &request_id, &model, &tx).await {
-            Ok(EmulatedStreamOutcome::Final {
+        let mut sink = sink::StreamingSink::new(tx.clone(), request_id.clone(), model.clone());
+
+        match run_emulated_completion_loop(
+            &body,
+            provider,
+            &provider_id,
+            provider_messages.clone(),
+            initial_conversation_id,
+            &mut sink,
+        )
+        .await
+        {
+            Ok(EmulatedOutcome::Final {
                 content,
                 conversation_id,
-                streamed,
             }) => {
                 if should_store_emulated_tracker(body.temporary) {
                     if let Some(cid) = conversation_id {
-                    TRACKER.store(&provider_messages, &provider_id, cid);
+                        TRACKER.store(&provider_messages, &provider_id, cid);
                     }
                 }
-
-                if !streamed && !content.is_empty() {
+                // If nothing was streamed (can_retry is true), send the
+                // full content as a single chunk.
+                if sink.can_retry() && !content.is_empty() {
                     let _ = tx
                         .send(Ok(format_sse_chunk(
                             &request_id,
@@ -375,7 +1061,6 @@ fn stream_emulated_completion_response(
                         )))
                         .await;
                 }
-
                 let _ = tx
                     .send(Ok(format_sse_chunk(
                         &request_id,
@@ -386,17 +1071,16 @@ fn stream_emulated_completion_response(
                     .await;
                 let _ = tx.send(Ok("data: [DONE]\n\n".into())).await;
             }
-            Ok(EmulatedStreamOutcome::ToolCall {
+            Ok(EmulatedOutcome::ToolCall {
                 name,
                 arguments,
                 conversation_id,
             }) => {
                 if should_store_emulated_tracker(body.temporary) {
                     if let Some(cid) = conversation_id {
-                    TRACKER.store(&provider_messages, &provider_id, cid);
+                        TRACKER.store(&provider_messages, &provider_id, cid);
                     }
                 }
-
                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
                 let _ = tx
                     .send(Ok(format_sse_chunk(
@@ -417,7 +1101,6 @@ fn stream_emulated_completion_response(
                         None,
                     )))
                     .await;
-
                 for chunk in arguments.as_bytes().chunks(32) {
                     let _ = tx
                         .send(Ok(format_sse_chunk(
@@ -439,7 +1122,6 @@ fn stream_emulated_completion_response(
                         )))
                         .await;
                 }
-
                 let _ = tx
                     .send(Ok(format_sse_chunk(
                         &request_id,
@@ -468,775 +1150,35 @@ fn stream_emulated_completion_response(
     event_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-enum EmulatedStreamOutcome {
-    Final {
-        content: String,
-        conversation_id: Option<String>,
-        streamed: bool,
-    },
-    ToolCall {
-        name: String,
-        arguments: String,
-        conversation_id: Option<String>,
-    },
-}
-
-enum EmulatedCompletionOutcome {
-    Final {
-        content: String,
-        conversation_id: Option<String>,
-    },
-    ToolCall {
-        name: String,
-        arguments: String,
-        conversation_id: Option<String>,
-    },
-}
-
-async fn run_emulated_completion(
-    body: &CompletionRequest,
-    provider: Arc<dyn Provider>,
-    provider_id: &str,
-    provider_messages: Vec<ChatMessage>,
-    initial_conversation_id: Option<String>,
-) -> Result<EmulatedCompletionOutcome, RouteError> {
-    let tools = body.tools.clone().unwrap_or_default();
-    let mut working_messages = inject_emulated_tool_prompt(
-        &provider_messages,
-        &tools,
-        body.tool_choice.as_ref(),
-    );
-    let mut conversation_id = initial_conversation_id;
-
-    for attempt in 0..3 {
-        let provider_response = provider
-            .send_message(
-                &working_messages,
-                &body.model,
-        &ChatOptions {
-            reasoning_effort: body.reasoning_effort.clone(),
-            stream: body.stream,
-            stop: body.stop.clone(),
-            tools: Vec::new(),
-            tool_choice: None,
-            temporary: body.temporary,
-        },
-                conversation_id.as_deref(),
-            )
-            .await
-            .map_err(|e| RouteError {
-                status: StatusCode::BAD_GATEWAY,
-                message: e.to_string(),
-                err_type: "upstream_error",
-                code: "upstream_error",
-            })?;
-
-        conversation_id = next_emulated_conversation_id(
-            body.temporary,
-            conversation_id,
-            provider_response.conversation_id.clone(),
-        );
-
-        let raw_output = collect_provider_text(provider_response.stream).await;
-
-        match parse_emulated_tool_response(&raw_output) {
-            Ok(EmulatedToolResult::Final(content)) => {
-                if let Some(err) = final_answer_requires_tool_retry(body, &tools, &content) {
-                    if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &err) {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-
-                    return Err(RouteError {
-                        status: StatusCode::BAD_GATEWAY,
-                        message: format!(
-                            "{} emulated tool call final-answer validation failed after retries: {}",
-                            provider_id, err
-                        ),
-                        err_type: "upstream_error",
-                        code: "tool_call_invalid",
-                    });
-                }
-
-                return Ok(EmulatedCompletionOutcome::Final {
-                    content,
-                    conversation_id,
-                });
-            }
-            Ok(EmulatedToolResult::ToolCall { name, arguments }) => {
-                let resolved_name = match resolve_emulated_tool_name(&name, &tools, body.tool_choice.as_ref()) {
-                    Ok(name) => name,
-                    Err(err) if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(RouteError {
-                            status: StatusCode::BAD_GATEWAY,
-                            message: format!(
-                                "{} emulated tool call name resolution failed after retries: {}",
-                                provider_id, err
-                            ),
-                            err_type: "upstream_error",
-                            code: "tool_call_invalid",
-                        });
-                    }
-                };
-
-                match validate_emulated_tool_call(
-                    &resolved_name,
-                    &arguments,
-                    &tools,
-                    body.tool_choice.as_ref(),
-                ) {
-                    Ok(()) => {
-                        if is_exact_consecutive_duplicate_tool_call(
-                            &provider_messages,
-                            &resolved_name,
-                            &arguments,
-                        ) {
-                            let err = duplicate_tool_call_error(&resolved_name, &arguments);
-                            if attempt < 2 {
-                                append_repair_turn(
-                                    &mut working_messages,
-                                    raw_output,
-                                    &err,
-                                    &tools,
-                                    body.tool_choice.as_ref(),
-                                );
-                                continue;
-                            }
-
-                            return Err(RouteError {
-                                status: StatusCode::BAD_GATEWAY,
-                                message: format!(
-                                    "{} emulated tool call validation failed after retries: {}",
-                                    provider_id, err
-                                ),
-                                err_type: "upstream_error",
-                                code: "tool_call_invalid",
-                            });
-                        }
-
-                        return Ok(EmulatedCompletionOutcome::ToolCall {
-                            name: resolved_name,
-                            arguments,
-                            conversation_id,
-                        });
-                    }
-                    Err(err) if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                    }
-                    Err(err) => {
-                        return Err(RouteError {
-                            status: StatusCode::BAD_GATEWAY,
-                            message: format!(
-                                "{} emulated tool call validation failed after retries: {}",
-                                provider_id, err
-                            ),
-                            err_type: "upstream_error",
-                            code: "tool_call_invalid",
-                        });
-                    }
-                }
-            }
-            Err(err) if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                append_repair_turn(
-                    &mut working_messages,
-                    raw_output,
-                    &err,
-                    &tools,
-                    body.tool_choice.as_ref(),
-                );
-            }
-            Err(err)
-                if attempt < 2
-                    && err == "response did not include a polychat block"
-                    && looks_like_structured_payload(&raw_output) =>
-            {
-                let retry_err =
-                    "the model returned a structured JSON payload instead of a valid tool call block or plain final answer";
-                append_repair_turn(
-                    &mut working_messages,
-                    raw_output,
-                    retry_err,
-                    &tools,
-                    body.tool_choice.as_ref(),
-                );
-            }
-            Err(err) if should_accept_plain_text_final(body.tool_choice.as_ref(), &err, &raw_output) => {
-                let content = raw_output.trim().to_string();
-                if let Some(retry_err) = final_answer_requires_tool_retry(body, &tools, &content) {
-                    if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &retry_err) {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &retry_err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-
-                    return Err(RouteError {
-                        status: StatusCode::BAD_GATEWAY,
-                        message: format!(
-                            "{} emulated tool call final-answer validation failed after retries: {}",
-                            provider_id, retry_err
-                        ),
-                        err_type: "upstream_error",
-                        code: "tool_call_invalid",
-                    });
-                }
-
-                return Ok(EmulatedCompletionOutcome::Final {
-                    content,
-                    conversation_id,
-                });
-            }
-            Err(err) => {
-                return Err(RouteError {
-                    status: StatusCode::BAD_GATEWAY,
-                    message: format!(
-                        "{} emulated tool call parsing failed after retries: {}. Last response: {}",
-                        provider_id, err, raw_output
-                    ),
-                    err_type: "upstream_error",
-                    code: "tool_call_invalid",
-                });
-            }
-        }
-    }
-
-    Err(RouteError {
-        status: StatusCode::BAD_GATEWAY,
-        message: format!("{} emulated tool call loop exhausted", provider_id),
-        err_type: "upstream_error",
-        code: "tool_call_invalid",
-    })
-}
-
-async fn run_emulated_completion_streaming(
-    body: &CompletionRequest,
-    provider: Arc<dyn Provider>,
-    provider_id: &str,
-    provider_messages: Vec<ChatMessage>,
-    initial_conversation_id: Option<String>,
-    request_id: &str,
-    model: &str,
-    tx: &tokio::sync::mpsc::Sender<Result<String, std::io::Error>>,
-) -> Result<EmulatedStreamOutcome, RouteError> {
-    let tools = body.tools.clone().unwrap_or_default();
-    let mut working_messages = inject_emulated_tool_prompt(
-        &provider_messages,
-        &tools,
-        body.tool_choice.as_ref(),
-    );
-    let mut conversation_id = initial_conversation_id;
-
-    for attempt in 0..3 {
-        let provider_response = provider
-            .send_message(
-                &working_messages,
-                &body.model,
-        &ChatOptions {
-            reasoning_effort: body.reasoning_effort.clone(),
-            stream: body.stream,
-            stop: body.stop.clone(),
-            tools: Vec::new(),
-            tool_choice: None,
-            temporary: body.temporary,
-        },
-                conversation_id.as_deref(),
-            )
-            .await
-            .map_err(|e| RouteError {
-                status: StatusCode::BAD_GATEWAY,
-                message: e.to_string(),
-                err_type: "upstream_error",
-                code: "upstream_error",
-            })?;
-
-        conversation_id = next_emulated_conversation_id(
-            body.temporary,
-            conversation_id,
-            provider_response.conversation_id.clone(),
-        );
-
-        let (raw_output, streamed_any) = stream_provider_text(
-            provider_response.stream,
-            request_id,
-            model,
-            tx,
-        )
-        .await;
-
-        match parse_emulated_tool_response(&raw_output) {
-            Ok(EmulatedToolResult::Final(content)) => {
-                if let Some(err) = final_answer_requires_tool_retry(body, &tools, &content) {
-                    if !streamed_any
-                        && attempt < 2
-                        && should_retry_emulated_response(body.tool_choice.as_ref(), &err)
-                    {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-                }
-
-                return Ok(EmulatedStreamOutcome::Final {
-                    content,
-                    conversation_id,
-                    streamed: streamed_any,
-                });
-            }
-            Ok(EmulatedToolResult::ToolCall { name, arguments }) => {
-                let resolved_name = match resolve_emulated_tool_name(&name, &tools, body.tool_choice.as_ref()) {
-                    Ok(name) => name,
-                    Err(err) if !streamed_any
-                        && attempt < 2
-                        && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(RouteError {
-                            status: StatusCode::BAD_GATEWAY,
-                            message: format!(
-                                "{} emulated tool call name resolution failed after retries: {}",
-                                provider_id, err
-                            ),
-                            err_type: "upstream_error",
-                            code: "tool_call_invalid",
-                        });
-                    }
-                };
-
-                match validate_emulated_tool_call(
-                    &resolved_name,
-                    &arguments,
-                    &tools,
-                    body.tool_choice.as_ref(),
-                ) {
-                    Ok(()) => {
-                        if is_exact_consecutive_duplicate_tool_call(
-                            &provider_messages,
-                            &resolved_name,
-                            &arguments,
-                        ) {
-                            let err = duplicate_tool_call_error(&resolved_name, &arguments);
-                            if !streamed_any && attempt < 2 {
-                                append_repair_turn(
-                                    &mut working_messages,
-                                    raw_output,
-                                    &err,
-                                    &tools,
-                                    body.tool_choice.as_ref(),
-                                );
-                                continue;
-                            }
-
-                            return Err(RouteError {
-                                status: StatusCode::BAD_GATEWAY,
-                                message: format!(
-                                    "{} emulated tool call validation failed after retries: {}",
-                                    provider_id, err
-                                ),
-                                err_type: "upstream_error",
-                                code: "tool_call_invalid",
-                            });
-                        }
-
-                        return Ok(EmulatedStreamOutcome::ToolCall {
-                            name: resolved_name,
-                            arguments,
-                            conversation_id,
-                        });
-                    }
-                    Err(err) if !streamed_any
-                        && attempt < 2
-                        && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(RouteError {
-                            status: StatusCode::BAD_GATEWAY,
-                            message: format!(
-                                "{} emulated tool call validation failed after retries: {}",
-                                provider_id, err
-                            ),
-                            err_type: "upstream_error",
-                            code: "tool_call_invalid",
-                        });
-                    }
-                }
-            }
-            Err(err) if !streamed_any
-                && should_accept_plain_text_final(body.tool_choice.as_ref(), &err, &raw_output) => {
-                let content = raw_output.trim().to_string();
-                if let Some(retry_err) = final_answer_requires_tool_retry(body, &tools, &content) {
-                    if attempt < 2 && should_retry_emulated_response(body.tool_choice.as_ref(), &retry_err) {
-                        append_repair_turn(
-                            &mut working_messages,
-                            raw_output,
-                            &retry_err,
-                            &tools,
-                            body.tool_choice.as_ref(),
-                        );
-                        continue;
-                    }
-                }
-
-                return Ok(EmulatedStreamOutcome::Final {
-                    content,
-                    conversation_id,
-                    streamed: false,
-                });
-            }
-            Err(err) if !streamed_any
-                && attempt < 2
-                && should_retry_emulated_response(body.tool_choice.as_ref(), &err) => {
-                append_repair_turn(
-                    &mut working_messages,
-                    raw_output,
-                    &err,
-                    &tools,
-                    body.tool_choice.as_ref(),
-                );
-                continue;
-            }
-            Err(err) => {
-                return Err(RouteError {
-                    status: StatusCode::BAD_GATEWAY,
-                    message: format!(
-                        "{} emulated tool call parsing failed after retries: {}",
-                        provider_id, err
-                    ),
-                    err_type: "upstream_error",
-                    code: "tool_call_invalid",
-                });
-            }
-        }
-    }
-
-    Err(RouteError {
-        status: StatusCode::BAD_GATEWAY,
-        message: format!("{} emulated tool call failed after retries", provider_id),
-        err_type: "upstream_error",
-        code: "tool_call_invalid",
-    })
-}
-
-fn append_repair_turn(
-    working_messages: &mut Vec<ChatMessage>,
-    raw_output: String,
-    err: &str,
-    tools: &[Value],
-    tool_choice: Option<&Value>,
-) {
-    working_messages.push(ChatMessage {
-        role: "assistant".into(),
-        content: raw_output,
-        tool_call_id: None,
-    });
-    working_messages.push(ChatMessage {
-        role: "user".into(),
-        content: build_repair_prompt_with_context(err, tools, tool_choice),
-        tool_call_id: None,
-    });
-}
-
-fn inject_emulated_tool_prompt(
-    messages: &[ChatMessage],
-    tools: &[Value],
-    tool_choice: Option<&Value>,
-) -> Vec<ChatMessage> {
-    let prompt = build_emulated_tool_prompt(tools, tool_choice);
-    let mut result = Vec::new();
-    let mut injected_system = false;
-
-    for msg in messages {
-        if msg.role == "tool" {
-            result.push(ChatMessage {
-                role: "system".into(),
-                content: format_tool_result_message(msg.tool_call_id.as_deref(), &msg.content),
-                tool_call_id: None,
-            });
-        } else if msg.role == "system" && !injected_system {
-            result.push(ChatMessage {
-                role: "system".into(),
-                content: format!("{}\n\n{}", msg.content, prompt),
-                tool_call_id: None,
-            });
-            injected_system = true;
-        } else {
-            result.push(msg.clone());
-        }
-    }
-
-    if !injected_system {
-        result.insert(
-            0,
-            ChatMessage {
-                role: "system".into(),
-                content: prompt,
-                tool_call_id: None,
-            },
-        );
-    }
-
-    result
-}
-
-async fn collect_provider_text(mut chunk_stream: crate::providers::ChunkStream) -> String {
-    let mut output = String::new();
-    while let Some(result) = chunk_stream.next().await {
-        match result {
-            Ok(ChatChunk::Content(text)) => output.push_str(&text),
-            Ok(ChatChunk::Thinking(_)) => {}
-            Err(_) => break,
-        }
-    }
-    output
-}
-
-async fn stream_provider_text(
-    mut chunk_stream: crate::providers::ChunkStream,
-    request_id: &str,
-    model: &str,
-    tx: &tokio::sync::mpsc::Sender<Result<String, std::io::Error>>,
-) -> (String, bool) {
-    let mut parser = StreamingEmulatedParser::new();
-    let mut streamed_any = false;
-
-    while let Some(result) = chunk_stream.next().await {
-        match result {
-            Ok(ChatChunk::Content(text)) => {
-                for chunk in parser.feed(&text) {
-                    streamed_any = true;
-                    let _ = tx
-                        .send(Ok(format_sse_chunk(
-                            request_id,
-                            model,
-                            StreamDelta {
-                                content: Some(chunk),
-                                ..Default::default()
-                            },
-                            None,
-                        )))
-                        .await;
-                }
-            }
-            Ok(ChatChunk::Thinking(_)) => {}
-            Err(_) => break,
-        }
-    }
-
-    (parser.raw_output().to_string(), streamed_any)
-}
-
-fn should_stream_emulated_incrementally(body: &CompletionRequest, tools: &[Value]) -> bool {
-    match body.tool_choice.as_ref() {
-        Some(Value::String(choice)) if choice == "required" => return false,
-        Some(Value::Object(_)) => return false,
-        _ => {}
-    }
-
-    explicit_tool_request(body, tools).is_none()
-}
-
-fn explicit_tool_request(body: &CompletionRequest, tools: &[Value]) -> Option<String> {
-    let user_text = latest_user_text(&body.messages)?;
-    let user_lower = user_text.to_lowercase();
-
-    for tool in tools {
-        if let Some(name) = tool
-            .get("function")
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-        {
-            let tool_name = name.to_lowercase();
-            if user_lower.contains(&format!("use the {} tool", tool_name))
-                || user_lower.contains(&format!("use the `{}` tool", tool_name))
-                || user_lower.contains(&format!("use {} tool", tool_name))
-                || user_lower.contains(&format!("use {} to ", tool_name))
-                || user_lower.contains(&format!("call the {} tool", tool_name))
-                || user_lower.contains(&format!("call {} with ", tool_name))
-                || user_lower.contains(&format!("run the {} tool", tool_name))
-                || user_lower.contains(&format!("invoke the {} tool", tool_name))
-            {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    None
-}
-
-fn final_answer_requires_tool_retry(
-    body: &CompletionRequest,
-    tools: &[Value],
-    content: &str,
-) -> Option<String> {
-    match body.tool_choice.as_ref() {
-        Some(Value::String(choice)) if choice == "required" => {
-            return Some("tool choice was `required`, but the model answered directly".into());
-        }
-        Some(Value::Object(obj)) => {
-            if let Some(name) = obj
-                .get("function")
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str())
-            {
-                return Some(format!(
-                    "tool choice required `{}`, but the model answered directly",
-                    name
-                ));
-            }
-        }
-        _ => {}
-    }
-
-    let content_lower = normalize_validation_text(content);
-    if content_lower.contains("don't have access")
-        || content_lower.contains("do not have access")
-        || content_lower.contains("don't have permission")
-        || content_lower.contains("do not have permission")
-        || content_lower.contains("cannot run")
-        || content_lower.contains("can't run")
-        || content_lower.contains("i'm a text-based ai")
-    {
-        return Some("the model incorrectly denied having tool access".into());
-    }
-
-    if final_answer_claims_external_action(&content_lower) {
-        if has_tool_result_after_latest_user(&body.messages) {
-            return None;
-        }
-
-        return Some(
-            "the model claimed it already changed files, ran commands, or completed another external action without using a tool call".into(),
-        );
-    }
-
-    if final_answer_contains_inline_tool_call_json(content) {
-        return Some(
-            "the model attempted to show tool-call JSON inline instead of returning a clean tool call or final answer block".into(),
-        );
-    }
-
-    if final_answer_seeks_permission_for_safe_tool_use(&content_lower, tools) {
-        return Some(
-            "the model asked for permission to use an available safe tool instead of using it directly".into(),
-        );
-    }
-
-    if final_answer_requests_user_supplied_local_inputs(&content_lower, tools) {
-        return Some(
-            "the model asked the user to provide inspectable local inputs instead of using an available safe tool".into(),
-        );
-    }
-
-    if let Some(name) = explicit_tool_request(body, tools) {
-        if has_tool_result_after_latest_user(&body.messages) {
-            return None;
-        }
-
-        return Some(format!(
-            "the user explicitly requested the `{}` tool, but the model answered directly",
-            name
-        ));
-    }
-
-    None
-}
-
-fn resolve_emulated_tool_name(
-    name: &str,
-    tools: &[Value],
-    tool_choice: Option<&Value>,
-) -> Result<String, String> {
-    if !name.is_empty() {
-        return Ok(name.to_string());
-    }
-
-    if let Some(Value::Object(obj)) = tool_choice {
-        if let Some(name) = obj
-            .get("function")
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-        {
-            return Ok(name.to_string());
-        }
-    }
-
-    let mut names = tools.iter().filter_map(|tool| {
-        tool.get("function")
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-
-    let first = names
-        .next()
-        .ok_or_else(|| "tool call omitted a name and no tools were available".to_string())?;
-    if names.next().is_none() {
-        Ok(first)
-    } else {
-        Err("tool call omitted a name and multiple tools were available".into())
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::{
         duplicate_tool_call_error,
-        final_answer_claims_external_action, final_answer_contains_inline_tool_call_json,
-        final_answer_requests_user_supplied_local_inputs, final_answer_requires_tool_retry,
-        final_answer_seeks_permission_for_safe_tool_use,
         format_tool_result_message,
-        has_tool_result_after_latest_user, inject_emulated_tool_prompt,
-        is_exact_consecutive_duplicate_tool_call, latest_completed_tool_call,
-        looks_like_structured_payload, resolve_emulated_tool_name, should_accept_plain_text_final,
-        next_emulated_conversation_id, normalize_tool_arguments, should_retry_emulated_response,
+        inject_emulated_tool_prompt,
+        is_exact_consecutive_duplicate_tool_call,
+        latest_completed_tool_call,
+        next_emulated_conversation_id,
+        normalize_tool_arguments,
         should_store_emulated_tracker,
         should_stream_emulated_incrementally,
+    };
+    use super::validator::{
+        explicit_tool_request,
+        final_answer_claims_external_action,
+        final_answer_contains_inline_tool_call_json,
+        final_answer_requests_user_supplied_local_inputs,
+        final_answer_requires_tool_retry,
+        final_answer_seeks_permission_for_safe_tool_use,
+        has_tool_result_after_latest_user,
+        looks_like_structured_payload,
+        resolve_emulated_tool_name,
+        should_accept_plain_text_final,
+        should_retry_emulated_response,
     };
     use crate::providers::ChatMessage;
     use crate::routes::completion_messages::{CompletionMessage, CompletionRequest};
@@ -1318,7 +1260,7 @@ mod tests {
     #[test]
     fn normalizes_tool_arguments_json_for_duplicate_checks() {
         assert_eq!(
-            normalize_tool_arguments("{\n  \"path\": \"package.json\"\n}"),
+            normalize_tool_arguments("{\n \"path\": \"package.json\"\n}"),
             normalize_tool_arguments("{\"path\":\"package.json\"}")
         );
     }
@@ -1338,7 +1280,7 @@ mod tests {
         assert!(is_exact_consecutive_duplicate_tool_call(
             &messages,
             "read",
-            "{\n  \"path\": \"package.json\"\n}"
+            "{\n \"path\": \"package.json\"\n}"
         ));
     }
 
@@ -1448,7 +1390,7 @@ mod tests {
         let err = final_answer_requires_tool_retry(
             &request,
             &tools,
-            "I currently don’t have permission to read files in your repo.",
+            "I currently don\u{2019}t have permission to read files in your repo.",
         );
         assert!(err
             .unwrap()
@@ -1474,7 +1416,6 @@ mod tests {
             name: None,
             tool_calls: None,
         });
-
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
         let err = final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
         assert!(err.is_none());
@@ -1549,8 +1490,7 @@ mod tests {
 
     #[test]
     fn structured_json_payload_is_not_accepted_as_plain_text_final() {
-        let payload =
-            "{\"name\":\"0001-generate-readme\",\"type\":\"document\",\"content\":\"hello\"}";
+        let payload = "{\"name\":\"0001-generate-readme\",\"type\":\"document\",\"content\":\"hello\"}";
         assert!(looks_like_structured_payload(payload));
         assert!(!should_accept_plain_text_final(
             None,
@@ -1630,7 +1570,6 @@ mod tests {
             name: None,
             tool_calls: None,
         });
-
         let err = final_answer_requires_tool_retry(
             &request,
             &[],
@@ -1649,7 +1588,6 @@ mod tests {
             name: None,
             tool_calls: None,
         });
-
         assert!(has_tool_result_after_latest_user(&request.messages));
     }
 
@@ -1663,7 +1601,6 @@ mod tests {
             name: None,
             tool_calls: None,
         });
-
         assert!(!has_tool_result_after_latest_user(&request.messages));
     }
 
@@ -1698,9 +1635,7 @@ mod tests {
             content: "cwd is /tmp".into(),
             tool_call_id: Some("call_1".into()),
         }];
-
         let injected = inject_emulated_tool_prompt(&messages, &[], None);
-
         assert_eq!(injected[0].role, "system");
         assert!(injected[0]
             .content
