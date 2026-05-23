@@ -21,8 +21,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import * as tty from "node:tty";
-import { createSSEParser } from "../utils/stream.js";
+import { createSSEParser, ToolCallAccumulator } from "../utils/stream.js";
 import { countEstimatedTokens } from "../utils/token-estimate.js";
+import { TOOL_DEFINITIONS, type ApprovalMode, type ToolCall } from "./tools.js";
+import { executeTool } from "./executor.js";
+import { shouldApprove } from "./approval.js";
 
 // ── ANSI ──────────────────────────────────────────────────────────────────────
 
@@ -99,7 +102,11 @@ function appendHistory(line: string) {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+type ChatMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string; tool_calls?: ToolCall[] }
+  | { role: "tool"; content: string; tool_call_id: string; name?: string };
 type ModelInfo = { id: string; name: string; owned_by: string };
 type ConvInfo = { id: string; title: string };
 
@@ -241,6 +248,9 @@ export async function startRepl(initialModel: string): Promise<void> {
   let models: ModelInfo[] = [];
   let streaming = false;
   let streamAbort: AbortController | null = null;
+  let approvalMode: ApprovalMode = "cautious";
+  let maxToolRounds = 20;
+  let toolLoopAborted = false;
   const history = loadHistory();  // loaded once, kept in memory
 
   // ── Connect ──────────────────────────────────────────────────────────────────
@@ -285,6 +295,12 @@ export async function startRepl(initialModel: string): Promise<void> {
       set streaming(v) { streaming = v; },
       get streamAbort() { return streamAbort; },
       set streamAbort(v) { streamAbort = v; },
+      get approvalMode() { return approvalMode; },
+      set approvalMode(v) { approvalMode = v; },
+      get maxToolRounds() { return maxToolRounds; },
+      set maxToolRounds(v) { maxToolRounds = v; },
+      get toolLoopAborted() { return toolLoopAborted; },
+      set toolLoopAborted(v) { toolLoopAborted = v; },
     });
 
 
@@ -317,16 +333,26 @@ interface LoopState {
   activeConversationTitle: string | null;
   streaming: boolean;
   streamAbort: AbortController | null;
+  approvalMode: ApprovalMode;
+  maxToolRounds: number;
+  toolLoopAborted: boolean;
 }
 
 async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopResult> {
   const rl = makeRl(state.history);
 
-  // Ctrl+C: interrupt stream or print hint
+  // Ctrl+C: interrupt stream or tool loop or print hint
   rl.on("SIGINT", () => {
     if (state.streaming && state.streamAbort) {
       state.streamAbort.abort();
+      state.toolLoopAborted = true;
       process.stdout.write("\n" + y("(interrupted)") + "\n\n");
+      rl.prompt();
+      return;
+    }
+    if (state.toolLoopAborted === false) {
+      state.toolLoopAborted = true;
+      process.stdout.write("\n" + y("(agentic loop interrupted)") + "\n\n");
       rl.prompt();
       return;
     }
@@ -367,7 +393,7 @@ async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopRe
     for (const [cmd, desc] of cmds) process.stdout.write(`  ${g(cmd.padEnd(22))} ${d(desc)}\n`);
     process.stdout.write(`\n${d("Keyboard shortcuts:")}\n`);
     const shortcuts: [string, string][] = [
-      ["Ctrl+C", "interrupt stream / clear input"],
+      ["Ctrl+C", "interrupt stream / tool loop / clear input"],
       ["Ctrl+D", "exit"],
       ["Ctrl+L", "clear screen"],
       ["Up/Down", "history navigation"],
@@ -470,43 +496,137 @@ async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopRe
 
   async function sendMessage(content: string) {
     state.messages.push({ role: "user", content });
-    const history = [...state.messages];
     appendHistory(content);
     state.history.push(content);
     process.stdout.write("\n");
-    const abort = new AbortController();
-    state.streamAbort = abort; state.streaming = true;
-    const writer = new WrappingWriter();
-    const t0 = Date.now(); let thinking = ""; let full = "";
-    try {
-      const res = await fetch(`${serverUrl}/v1/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: state.currentModel, messages: history, stream: true, providerConversationId: state.activeConversationId }), signal: abort.signal });
-      if (!res.ok || !res.body) { const err = await res.json().catch(() => ({})) as { error?: { message?: string } }; process.stdout.write(r(`✗ ${err.error?.message ?? `Server error: ${res.status}`}`) + "\n\n"); state.messages.pop(); return; }
-      const reader = res.body.getReader(); const dec = new TextDecoder(); const parse = createSSEParser();
-      while (true) {
-        const { done, value } = await reader.read(); if (done) break;
-        for (const event of parse(dec.decode(value, { stream: true }))) {
-          if (event.data === "[DONE]" || !event.data || typeof event.data !== "object") continue;
-          const delta = (event.data as { choices?: Array<{ delta?: { content?: string; thinking?: string } }> }).choices?.[0]?.delta;
-          if (delta?.thinking) { writer.writeThinking(delta.thinking); thinking += delta.thinking; }
-          if (delta?.content) { writer.write(delta.content); full += delta.content; }
-        }
+    state.toolLoopAborted = false;
+
+    for (let round = 0; round < state.maxToolRounds; round++) {
+      if (state.toolLoopAborted) {
+        state.toolLoopAborted = false;
+        process.stdout.write(y("(agentic loop interrupted)") + "\n\n");
+        break;
       }
-      writer.newline();
-      const elapsed = (Date.now() - t0) / 1000;
-      const responseTokens = countEstimatedTokens(full);
-      const thinkingTokens = countEstimatedTokens(thinking);
-      const totalTokens = responseTokens + thinkingTokens;
-      const tokensPerSec = elapsed > 0 ? (totalTokens / elapsed).toFixed(1) : "0";
-      const thinkingNote = thinkingTokens > 0 ? ` · ${thinkingTokens} thinking tok` : "";
-      process.stdout.write(d(`\n● ${elapsed.toFixed(1)}s · ${responseTokens} response tok${thinkingNote} · ${tokensPerSec} tok/s`) + "\n\n");
-      if (full) state.messages.push({ role: "assistant", content: full });
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") { writer.newline(); process.stdout.write("\n" + y("(interrupted)") + "\n\n"); }
-      else { writer.newline(); process.stdout.write(r(`✗ ${err instanceof Error ? err.message : String(err)}`) + "\n\n"); state.messages.pop(); }
-    } finally { state.streaming = false; state.streamAbort = null; }
+
+      const abort = new AbortController();
+      state.streamAbort = abort;
+      state.streaming = true;
+      const writer = new WrappingWriter();
+      const t0 = Date.now();
+      let thinking = "";
+      let full = "";
+      let toolCallAcc = new ToolCallAccumulator();
+      let hadToolCalls = false;
+
+      try {
+        const res = await fetch(`${serverUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: state.currentModel,
+            messages: state.messages,
+            stream: true,
+            tools: TOOL_DEFINITIONS,
+            providerConversationId: state.activeConversationId,
+          }),
+          signal: abort.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
+          process.stdout.write(r(`\u2717 ${err.error?.message ?? `Server error: ${res.status}`}`) + "\n\n");
+          state.messages.pop();
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        const parse = createSSEParser();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (const event of parse(dec.decode(value, { stream: true }))) {
+            if (event.data === "[DONE]" || !event.data || typeof event.data !== "object") continue;
+            const delta = (event.data as any).choices?.[0]?.delta;
+            if (!delta) continue;
+            if (delta.tool_calls) { hadToolCalls = true; toolCallAcc.feed(delta); }
+            if (delta.thinking) { writer.writeThinking(delta.thinking); thinking += delta.thinking; }
+            if (delta.content) { writer.write(delta.content); full += delta.content; }
+          }
+        }
+
+        writer.newline();
+
+        if (hadToolCalls) {
+          const toolCalls = toolCallAcc.finish();
+          if (toolCalls.length > 0) {
+            state.messages.push({ role: "assistant", content: full || "", tool_calls: toolCalls });
+            for (const tc of toolCalls) {
+              const name = tc.function.name;
+              let args: Record<string, string>;
+              try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+              const argsPreview = tc.function.arguments.length > 120
+                ? tc.function.arguments.slice(0, 120) + "..." : tc.function.arguments;
+              process.stdout.write(y(`\u27e1 ${name}`) + d(` ${argsPreview}`) + "\n");
+              if (!shouldApprove(name, { mode: state.approvalMode })) {
+                const approved = await askApproval(name, args);
+                if (!approved) {
+                  process.stdout.write(d("  \u2717 Denied.") + "\n\n");
+                  state.messages.push({ role: "tool", tool_call_id: tc.id, name, content: "Tool call denied by user." });
+                  continue;
+                }
+              }
+              process.stdout.write(d("  \u22ee Executing...\r"));
+              const result = await executeTool(name, args);
+              const resultPreview = result.content.length > 500
+                ? result.content.slice(0, 500) + d(`\n  ... (${result.content.length} chars total)`) : result.content;
+              const resultColor = result.is_error ? r : d;
+              process.stdout.write("\r\x1b[K");
+              for (const line of resultPreview.split("\n")) { process.stdout.write(resultColor(`  ${line}`) + "\n"); }
+              process.stdout.write("\n");
+              state.messages.push({ role: "tool", tool_call_id: tc.id, name, content: result.is_error ? `Error: ${result.content}` : result.content });
+            }
+            continue;
+          }
+        }
+
+        const elapsed = (Date.now() - t0) / 1000;
+        const responseTokens = countEstimatedTokens(full);
+        const thinkingTokens = countEstimatedTokens(thinking);
+        const totalTokens = responseTokens + thinkingTokens;
+        const tokensPerSec = elapsed > 0 ? (totalTokens / elapsed).toFixed(1) : "0";
+        const thinkingNote = thinkingTokens > 0 ? ` \u00b7 ${thinkingTokens} thinking tok` : "";
+        if (round > 0) {
+          process.stdout.write(d(`\u25cf ${elapsed.toFixed(1)}s \u00b7 round ${round + 1}/${state.maxToolRounds}`) + "\n\n");
+        } else {
+          process.stdout.write(d(`\n\u25cf ${elapsed.toFixed(1)}s \u00b7 ${responseTokens} response tok${thinkingNote} \u00b7 ${tokensPerSec} tok/s`) + "\n\n");
+        }
+        if (full) state.messages.push({ role: "assistant", content: full });
+        break;
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          writer.newline(); process.stdout.write("\n" + y("(interrupted)") + "\n\n");
+        } else {
+          writer.newline(); process.stdout.write(r(`\u2717 ${err instanceof Error ? err.message : String(err)}`) + "\n\n");
+          if (round === 0) state.messages.pop();
+        }
+        break;
+      } finally {
+        state.streaming = false;
+        state.streamAbort = null;
+      }
+    }
   }
 
-  // ── Multi-line ────────────────────────────────────────────────────────────────
+  function askApproval(toolName: string, args: Record<string, string>): Promise<boolean> {
+    return new Promise((resolve) => {
+      const prompt = `  ${y("Allow")} ${toolName}? ${d(JSON.stringify(args).slice(0, 100))} [y/N] `;
+      rl.question(prompt, (answer) => { resolve(answer.trim().toLowerCase() === "y"); });
+    });
+  }
+
+// ── Multi-line ────────────────────────────────────────────────────────────────
 
   async function readMultiline(first: string): Promise<string> {
     const lines: string[] = []; if (first.trim()) lines.push(first.trim());
