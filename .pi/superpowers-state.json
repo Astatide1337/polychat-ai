@@ -30,15 +30,9 @@
     "phase": "idle",
     "testFiles": [],
     "sourceFiles": [
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/model_registry.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/mod.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/main.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/router.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/sessions.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/models.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/completions.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/generate.rs",
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/resolver.rs"
+      "/home/sohamb/Desktop/polychat/rust/server/src/providers/sse.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/providers/mod.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/providers/claude.rs"
     ],
     "redVerificationPending": false
   },

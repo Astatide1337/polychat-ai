@@ -297,82 +297,44 @@ impl Provider for ClaudeProvider {
 // ---------------------------------------------------------------------------
 
 fn stream_claude_chunks(response: reqwest::Response) -> ChunkStream {
-    use tokio::sync::mpsc;
-    let (tx, rx) = mpsc::channel::<anyhow::Result<ChatChunk>>(256);
+    use crate::providers::sse::{stream_sse_response, HandlerAction};
 
-    tokio::spawn(async move {
-        let mut pending = String::new();
-        let mut stream = response.bytes_stream();
-        use futures::StreamExt;
-
-        while let Some(chunk_result) = stream.next().await {
-            let bytes = match chunk_result {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("stream error: {}", e))).await;
-                    return;
+    stream_sse_response(response, |data| {
+        if let Ok(json) = serde_json::from_str::<Value>(data) {
+            if let Some(obj) = json.as_object() {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("error") {
+                    let msg = obj.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Claude returned an error");
+                    return HandlerAction::Emit(vec![Err(anyhow::anyhow!("{}", msg))]);
                 }
-            };
-
-            let chunk_str = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-            pending.push_str(&chunk_str);
-
-            while let Some(idx) = pending.find("\n\n") {
-                let frame = pending[..idx].to_string();
-                pending = pending[idx + 2..].to_string();
-
-                for line in frame.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
-                        continue;
-                    }
-                    if let Some(data) = line.strip_prefix("data:") {
-                        let data = data.trim();
-                        if data == "[DONE]" { return; }
-
-                        if let Ok(json) = serde_json::from_str::<Value>(data) {
-                            if let Some(obj) = json.as_object() {
-                                if obj.get("type").and_then(|v| v.as_str()) == Some("error") {
-                                    let msg = obj.get("error")
-                                        .and_then(|e| e.get("message"))
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Claude returned an error");
-                                    let _ = tx.send(Err(anyhow::anyhow!("{}", msg))).await;
-                                    return;
-                                }
-
-                                // message_stop = Claude's termination signal
-                                if obj.get("type").and_then(|v| v.as_str()) == Some("message_stop") {
-                                    return;
-                                }
-
-                                if obj.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
-                                    if let Some(delta) = obj.get("delta") {
-                                        let dt = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                        match dt {
-                                            "text_delta" => {
-                                                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                                                    let _ = tx.send(Ok(ChatChunk::Content(text.to_string()))).await;
-                                                }
-                                            }
-                                            "thinking_delta" => {
-                                                if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                                                    let _ = tx.send(Ok(ChatChunk::Thinking(thinking.to_string()))).await;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                // message_stop = Claude's termination signal
+                if obj.get("type").and_then(|v| v.as_str()) == Some("message_stop") {
+                    return HandlerAction::Done;
+                }
+                if obj.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
+                    if let Some(delta) = obj.get("delta") {
+                        let dt = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match dt {
+                            "text_delta" => {
+                                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                    return HandlerAction::Emit(vec![Ok(ChatChunk::Content(text.to_string()))]);
                                 }
                             }
+                            "thinking_delta" => {
+                                if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                    return HandlerAction::Emit(vec![Ok(ChatChunk::Thinking(thinking.to_string()))]);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
         }
-    });
-
-    Box::pin(ReceiverStream::new(rx))
+        HandlerAction::Emit(vec![])
+    })
 }
 
 // ---------------------------------------------------------------------------

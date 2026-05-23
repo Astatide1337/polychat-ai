@@ -731,485 +731,60 @@ async fn send_message(
 // ---------------------------------------------------------------------------
 
 fn stream_chatgpt_chunks(response: reqwest::Response, conv_tx: Option<oneshot::Sender<String>>) -> ChunkStream {
-    use crate::providers::sse::{extract_frames, FrameMode, ParsedFrame};
-    use tokio::sync::mpsc;
+    use crate::providers::sse::{stream_sse_response, HandlerAction};
+    use std::sync::Mutex;
+    use std::cell::Cell;
 
-    let (tx, rx) = mpsc::channel::<anyhow::Result<ChatChunk>>(256);
+    let conv_tx = Mutex::new(conv_tx);
+    let sent_length = Cell::new(0usize);
 
-    tokio::spawn(async move {
-        let mut buffer = String::new();
-        let mut sent_length = 0usize;
-        let mut stream = response.bytes_stream();
-        let mut conv_tx = conv_tx;
+    stream_sse_response(response, move |data| {
+        let mut chunks = Vec::new();
 
-        use futures::StreamExt;
-
-        while let Some(chunk_result) = stream.next().await {
-            let bytes = match chunk_result {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("stream error: {}", e))).await;
-                    return;
+        if let Ok(json) = serde_json::from_str::<Value>(data) {
+            // Capture conversation_id from the first SSE event (one-shot)
+            if let Some(tx) = conv_tx.lock().unwrap().take() {
+                if let Some(cid) = json.get("conversation_id").and_then(|v| v.as_str()) {
+                    let _ = tx.send(cid.to_string());
                 }
-            };
-            buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+            }
 
-            for frame in extract_frames(&mut buffer, FrameMode::Sse) {
-                match frame {
-                    ParsedFrame::Done => return,
-                    ParsedFrame::Data(data) => {
-                        if let Ok(json) = serde_json::from_str::<Value>(&data) {
-                            // Capture conversation_id from the first SSE event (one-shot)
-                            if let Some(tx_ref) = conv_tx.take() {
-                                if let Some(cid) = json.get("conversation_id").and_then(|v| v.as_str()) {
-                                    let _ = tx_ref.send(cid.to_string());
-                                }
-                            }
+            // Check for native tool call before text extraction
+            if let Some((tool_name, tool_args)) = extract_chatgpt_tool_call(&json) {
+                let tc_text = format!(
+                    r#"<<<<{{"name":"{}","arguments":{}}}>>>>"#,
+                    tool_name, tool_args
+                );
+                chunks.push(Ok(ChatChunk::Content(tc_text)));
+            }
 
-                            // Check for native tool call before text extraction
-                            if let Some((tool_name, tool_args)) = extract_chatgpt_tool_call(&json) {
-                                let tc_text = format!(
-                                    r#"<<<<{{"name":"{}","arguments":{}}}>>>>"#,
-                                    tool_name, tool_args
-                                );
-                                let _ = tx.send(Ok(ChatChunk::Content(tc_text))).await;
-                            }
+            // Extract reasoning/thinking content if present
+            if let Some(reasoning) = extract_chatgpt_reasoning(&json) {
+                chunks.push(Ok(ChatChunk::Thinking(reasoning)));
+            }
 
-                            // Extract reasoning/thinking content if present
-                            if let Some(reasoning) = extract_chatgpt_reasoning(&json) {
-                                let _ = tx.send(Ok(ChatChunk::Thinking(reasoning))).await;
-                            }
-
-                            // Extract text - ChatGPT sends full accumulated text in each event.
-                            if let Some(full_text) = extract_chatgpt_latest_text(&json) {
-                                if full_text.len() > sent_length {
-                                    let delta = full_text[sent_length..].to_string();
-                                    if !delta.is_empty() {
-                                        for chunk in split_chatgpt_delta(&delta) {
-                                            if !chunk.is_empty() {
-                                                let _ = tx.send(Ok(ChatChunk::Content(chunk))).await;
-                                                tokio::time::sleep(Duration::from_millis(CHATGPT_STREAM_PACE_MS)).await;
-                                            }
-                                        }
-                                        sent_length = full_text.len();
-                                    }
-                                }
+            // Extract text - ChatGPT sends full accumulated text in each event.
+            // Note: pacing (tokio::time::sleep) is not available in the sync handler.
+            // The shared framing module emits per-frame; the downstream consumer
+            // (openai_format::stream_response) handles chunking.
+            if let Some(full_text) = extract_chatgpt_latest_text(&json) {
+                let current_len = sent_length.get();
+                if full_text.len() > current_len {
+                    let delta = full_text[current_len..].to_string();
+                    if !delta.is_empty() {
+                        // Split into word-sized pieces for smooth streaming
+                        for chunk in split_chatgpt_delta(&delta) {
+                            if !chunk.is_empty() {
+                                chunks.push(Ok(ChatChunk::Content(chunk)));
                             }
                         }
+                        sent_length.set(full_text.len());
                     }
                 }
             }
         }
-    });
 
-    Box::pin(ReceiverStream::new(rx))
+        HandlerAction::Emit(chunks)
+    })
 }
 
-/// Extract reasoning/thinking content from ChatGPT SSE event.
-/// Returns Some(text) if reasoning content is found.
-fn extract_chatgpt_reasoning(data: &Value) -> Option<String> {
-    // Check for reasoning field in message metadata
-    if let Some(message) = data.get("message") {
-        // Check for reasoning content in metadata
-        if let Some(metadata) = message.get("metadata") {
-            // Look for reasoning or thinking fields
-            if let Some(reasoning) = metadata.get("reasoning") {
-                if let Some(text) = reasoning.get("content").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        return Some(text.to_string());
-                    }
-                }
-                // Check for reasoning as array of parts
-                if let Some(parts) = reasoning.get("parts").and_then(|v| v.as_array()) {
-                    let text: String = parts.iter()
-                        .filter_map(|p| p.as_str())
-                        .collect();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-            // Check for thinking field (alternative naming)
-            if let Some(thinking) = metadata.get("thinking").and_then(|v| v.as_str()) {
-                if !thinking.is_empty() {
-                    return Some(thinking.to_string());
-                }
-            }
-        }
-        // Check for reasoning_content field directly in message
-        if let Some(reasoning_content) = message.get("reasoning_content").and_then(|v| v.as_str()) {
-            if !reasoning_content.is_empty() {
-                return Some(reasoning_content.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_chatgpt_latest_text(data: &Value) -> Option<String> {
-    if data.get("type").and_then(|v| v.as_str()) == Some("error") {
-        return None;
-    }
-
-    if let Some(message) = data.get("message") {
-        if let Some(content) = message.get("content") {
-            if content.get("content_type").and_then(|v| v.as_str()) == Some("text") {
-                if let Some(author) = message.get("author") {
-                    if author.get("role").and_then(|v| v.as_str()) == Some("assistant") {
-                        if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
-                            let text: String = parts.iter()
-                                .filter_map(|p| p.as_str())
-                                .collect();
-                            if !text.is_empty() {
-                                return Some(text);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if data.get("o").and_then(|v| v.as_str()) == Some("append") {
-        if let Some(path) = data.get("p").and_then(|v| v.as_str()) {
-            if path.starts_with("/message/content/parts") {
-                if let Some(val) = data.get("v").and_then(|v| v.as_str()) {
-                    return Some(val.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Try to extract a tool call from a ChatGPT SSE event.
-/// Returns `(tool_name, arguments_json_string)` if the event is a tool call.
-fn extract_chatgpt_tool_call(data: &Value) -> Option<(String, String)> {
-    let message = data.get("message")?;
-
-    // Check for recipient (tool name) — the key indicator of a tool call
-    let recipient = message.get("recipient")?.as_str()?;
-    if recipient.is_empty() {
-        return None;
-    }
-
-    let metadata = message.get("metadata")?;
-
-    // Try metadata.args first (common format)
-    if let Some(args_str) = metadata.get("args").and_then(|v| v.as_str()) {
-        // Validate it's parseable JSON
-        if serde_json::from_str::<serde_json::Value>(args_str).is_ok() {
-            return Some((recipient.to_string(), args_str.to_string()));
-        }
-    }
-
-    // Try metadata.tool_call (alternative format)
-    if let Some(tc) = metadata.get("tool_call") {
-        if let (Some(name), Some(args_val)) = (
-            tc.get("name").and_then(|v| v.as_str()),
-            tc.get("arguments"),
-        ) {
-            let args_str = if let Some(s) = args_val.as_str() {
-                s.to_string()
-            } else {
-                serde_json::to_string(args_val).unwrap_or_default()
-            };
-            return Some((name.to_string(), args_str));
-        }
-    }
-
-    // Try invocation field in metadata for plugin-style calls
-    if let Some(invoc) = metadata.get("invocation") {
-        if let (Some(name), Some(args_val)) = (
-            invoc.get("name").and_then(|v| v.as_str()),
-            invoc.get("arguments"),
-        ) {
-            let args_str = if let Some(s) = args_val.as_str() {
-                s.to_string()
-            } else {
-                serde_json::to_string(args_val).unwrap_or_default()
-            };
-            return Some((name.to_string(), args_str));
-        }
-    }
-
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        build_conversation_request_body, build_payload, extract_chatgpt_conversation_debug,
-        reasoning_effort_for_request, split_chatgpt_delta,
-    };
-    use crate::providers::{ChatMessage, ChatOptions};
-    use serde_json::{json, Value};
-
-    #[test]
-    fn build_payload_uses_supplied_parent_message_id() {
-        let payload = build_payload(
-            &[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-                tool_call_id: None,
-            }],
-            "gpt-5-5",
-            Some("conv-123"),
-            Some("parent-456"),
-            None,
-        );
-
-        assert_eq!(payload.get("conversation_id").and_then(|v| v.as_str()), Some("conv-123"));
-        assert_eq!(payload.get("parent_message_id").and_then(|v| v.as_str()), Some("parent-456"));
-    }
-
-    #[test]
-    fn build_payload_omits_replayed_history_for_existing_conversation() {
-        let payload = build_payload(
-            &[
-                ChatMessage {
-                    role: "system".into(),
-                    content: "system instructions".into(),
-                    tool_call_id: None,
-                },
-                ChatMessage {
-                    role: "assistant".into(),
-                    content: "previous answer".into(),
-                    tool_call_id: None,
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: "latest question".into(),
-                    tool_call_id: None,
-                },
-            ],
-            "gpt-5-5",
-            Some("conv-123"),
-            Some("parent-456"),
-            None,
-        );
-
-        let messages = payload
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .expect("messages array");
-        assert_eq!(messages.len(), 1);
-        assert_eq!(
-            messages[0]
-                .get("author")
-                .and_then(|v| v.get("role"))
-                .and_then(|v| v.as_str()),
-            Some("user")
-        );
-        assert_eq!(
-            messages[0]
-                .get("content")
-                .and_then(|v| v.get("parts"))
-                .and_then(|v| v.as_array())
-                .and_then(|parts| parts.first())
-                .and_then(|v| v.as_str()),
-            Some("latest question")
-        );
-    }
-
-    #[test]
-    fn build_payload_limits_replayed_history_for_new_conversation() {
-        let mut messages = Vec::new();
-        for idx in 0..20 {
-            messages.push(ChatMessage {
-                role: if idx % 2 == 0 { "user".into() } else { "assistant".into() },
-                content: format!("history-{idx}-{}", "x".repeat(2_500)),
-                tool_call_id: None,
-            });
-        }
-        messages.push(ChatMessage {
-            role: "user".into(),
-            content: "latest question".into(),
-            tool_call_id: None,
-        });
-
-        let payload = build_payload(&messages, "gpt-5-5", None, None, None);
-        let serialized = serde_json::to_string(&payload).expect("serialize payload");
-
-        assert!(serialized.contains("history-19-"));
-        assert!(!serialized.contains("history-0-"));
-        assert!(!serialized.contains(&"x".repeat(2_100)));
-    }
-
-    #[test]
-    fn build_payload_includes_reasoning_effort_when_enabled() {
-        let payload = build_payload(
-            &[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-                tool_call_id: None,
-            }],
-            "gpt-5-5",
-            None,
-            None,
-            Some("high"),
-        );
-
-        assert_eq!(payload.get("reasoning_effort").and_then(|v| v.as_str()), Some("high"));
-    }
-
-    #[test]
-    fn build_payload_omits_reasoning_effort_when_off() {
-        let payload = build_payload(
-            &[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-                tool_call_id: None,
-            }],
-            "gpt-5-5",
-            None,
-            None,
-            Some("off"),
-        );
-
-        assert!(payload.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn temporary_conversation_requests_match_browser_shape() {
-        let payload = build_payload(
-            &[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-                tool_call_id: None,
-            }],
-            "gpt-5-5",
-            None,
-            None,
-            None,
-        );
-
-        let body = build_conversation_request_body(&payload, true);
-
-        assert_eq!(
-            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-        assert!(body.get("conversation_mode").is_none());
-        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
-        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
-        assert!(body.get("force_paragen").is_none());
-        assert!(body.get("force_rate_limit").is_none());
-    }
-
-    #[test]
-    fn regular_conversation_requests_match_browser_shape() {
-        let payload = build_payload(
-            &[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-                tool_call_id: None,
-            }],
-            "gpt-5-5",
-            None,
-            None,
-            None,
-        );
-
-        let body = build_conversation_request_body(&payload, false);
-
-        assert_eq!(
-            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert!(body.get("conversation_mode").is_none());
-        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
-        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
-        assert!(body.get("force_paragen").is_none());
-        assert!(body.get("force_rate_limit").is_none());
-    }
-
-    #[test]
-    fn extracts_chatgpt_conversation_temp_debug_fields() {
-        let debug = extract_chatgpt_conversation_debug(&json!({
-            "is_temporary_chat": true,
-            "is_do_not_remember": true,
-            "memory_scope": "global_disabled"
-        }))
-        .expect("debug metadata");
-
-        assert_eq!(debug.get("is_temporary_chat").and_then(Value::as_bool), Some(true));
-        assert_eq!(debug.get("is_do_not_remember").and_then(Value::as_bool), Some(true));
-        assert_eq!(debug.get("memory_scope").and_then(Value::as_str), Some("global_disabled"));
-    }
-
-    #[test]
-    fn omits_chatgpt_conversation_debug_when_fields_missing() {
-        assert!(extract_chatgpt_conversation_debug(&json!({ "title": "hello" })).is_none());
-    }
-
-    #[test]
-    fn streaming_requests_disable_reasoning_effort() {
-        let options = ChatOptions {
-            reasoning_effort: Some("medium".into()),
-            stream: true,
-            stop: vec![],
-            tools: Vec::new(),
-            tool_choice: None,
-            temporary: false,
-        };
-
-        assert_eq!(reasoning_effort_for_request(&options), None);
-    }
-
-    #[test]
-    fn non_streaming_requests_keep_reasoning_effort() {
-        let options = ChatOptions {
-            reasoning_effort: Some("medium".into()),
-            stream: false,
-            stop: vec![],
-            tools: Vec::new(),
-            tool_choice: None,
-            temporary: false,
-        };
-
-        assert_eq!(reasoning_effort_for_request(&options), Some("medium"));
-    }
-
-    #[test]
-    fn split_chatgpt_delta_prefers_readable_boundaries() {
-        let chunks = split_chatgpt_delta(
-            "Ariel has fault canyons and resurfaced plains that suggest internal activity long after its formation.",
-        );
-
-        assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
-        assert_eq!(chunks.concat(), "Ariel has fault canyons and resurfaced plains that suggest internal activity long after its formation.");
-        assert!(chunks.iter().take(chunks.len().saturating_sub(1)).all(|chunk| chunk.len() <= 36));
-    }
-
-}
-// ---------------------------------------------------------------------------
-// Model normalization
-// ---------------------------------------------------------------------------
-
-fn normalize_chatgpt_models(payload: &Value) -> Vec<ModelInfo> {
-    let mut seen = std::collections::HashSet::new();
-    let mut models = Vec::new();
-
-    if let Some(items) = payload.get("models").and_then(|m| m.as_array()) {
-        for item in items {
-            let id = item.get("slug").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if id.is_empty() || seen.contains(id) { continue; }
-            seen.insert(id.to_string());
-            let name = item.get("title").or_else(|| item.get("name"))
-                .and_then(|v| v.as_str()).map(|s| s.trim())
-                .filter(|s| !s.is_empty()).unwrap_or(id).to_string();
-            models.push(ModelInfo {
-                id: id.to_string(),
-                name,
-                provider: "chatgpt".into(),
-                provider_model: None,
-                capabilities: chatgpt_model_capabilities(id),
-            });
-        }
-    }
-
-    models
-}

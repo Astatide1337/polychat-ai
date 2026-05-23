@@ -8,14 +8,11 @@
 //! - POST /apiv2/kimi.gateway.chat.v1.ChatService/ListChats (v2 Connect RPC)
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, USER_AGENT};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
 use crate::providers::*;
 use crate::session::load_session;
-use super::ReceiverStream;
 
 const BASE_URL: &str = "https://www.kimi.com";
 
@@ -372,82 +369,49 @@ impl Provider for KimiProvider {
 // ---------------------------------------------------------------------------
 
 fn stream_kimi_chunks(response: reqwest::Response) -> ChunkStream {
-    let (tx, rx) = mpsc::channel::<anyhow::Result<ChatChunk>>(256);
+    use crate::providers::sse::{stream_line_response, HandlerAction};
 
-    tokio::spawn(async move {
-        let mut buffer = String::new();
-        let mut stream = response.bytes_stream();
+    stream_line_response(response, |data| {
+        // Kimi SSE format: can be "data: <json>" or raw JSON lines
+        let json_str = if let Some(rest) = data.strip_prefix("data: ") {
+            rest
+        } else if data.starts_with('{') {
+            data
+        } else {
+            // Ignore non-data lines
+            return HandlerAction::Emit(vec![]);
+        };
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!("Kimi stream error: {}", e)))
-                        .await;
-                    return;
+        let json: Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(_) => return HandlerAction::Emit(vec![]),
+        };
+
+        let event = json.get("event").and_then(|e| e.as_str()).unwrap_or("");
+        match event {
+            "cmpl" => {
+                let loading = json.get("loading").and_then(|v| v.as_bool());
+                if loading == Some(false) {
+                    return HandlerAction::Emit(vec![]);
                 }
-            };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            // SSE is newline-delimited; process complete lines
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                // Kimi SSE format: can be "data: <json>" or raw JSON lines
-                let json_str = if let Some(rest) = trimmed.strip_prefix("data: ") {
-                    rest
-                } else if trimmed.starts_with('{') {
-                // Raw JSON line (no SSE prefix)
-                trimmed
-            } else {
-                    // Ignore non-data lines (event:, id:, etc.)
-                    continue;
-                };
-
-                let json: Value = match serde_json::from_str(json_str) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                let event = json.get("event").and_then(|e| e.as_str()).unwrap_or("");
-
-                match event {
-                    "cmpl" => {
-                        // Skip trailing cmpl after done (loading:false, empty text)
-                        let loading = json.get("loading").and_then(|v| v.as_bool());
-                        if loading == Some(false) {
-                            continue;
-                        }
-                        if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
-                            if !text.is_empty() {
-                                let _ = tx.send(Ok(ChatChunk::Content(text.to_string()))).await;
-                            }
-                        }
+                if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        return HandlerAction::Emit(vec![Ok(ChatChunk::Content(text.to_string()))]);
                     }
-                    "done" => return,
-                    "error" => {
-                        let msg = json
-                            .get("text")
-                            .or_else(|| json.get("message"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown error");
-                        let _ = tx
-                            .send(Err(anyhow::anyhow!("Kimi API error: {}", msg)))
-                            .await;
-                        return;
-                    }
-                    // ping, req, resp, rename, loading, zone_set — ignore
-                    _ => {}
                 }
+                HandlerAction::Emit(vec![])
             }
+            "done" => HandlerAction::Done,
+            "error" => {
+                let msg = json
+                    .get("text")
+                    .or_else(|| json.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                HandlerAction::Emit(vec![Err(anyhow::anyhow!("Kimi API error: {}", msg))])
+            }
+            _ => HandlerAction::Emit(vec![]),
         }
-    });
-
-    Box::pin(ReceiverStream::new(rx))
+    })
 }
+

@@ -8,7 +8,6 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_
 use serde::Deserialize;
 
 use crate::providers::*;
-use super::ReceiverStream;
 use crate::session::load_session;
 use crate::pow::solver::{self};
 
@@ -432,73 +431,37 @@ mod tests {
 // ---------------------------------------------------------------------------
 // DeepSeek SSE stream parser
 // ---------------------------------------------------------------------------
-/// Parse DeepSeek SSE events into ChatChunks using a channel-based approach.
+
+/// Parse DeepSeek SSE events into ChatChunks using shared SSE framing.
 pub fn stream_deepseek_chunks(
     response: reqwest::Response,
 ) -> ChunkStream {
-    use tokio::sync::mpsc;
+    use crate::providers::sse::{stream_sse_response, HandlerAction};
+    use std::cell::Cell;
 
-    let (tx, rx) = mpsc::channel::<anyhow::Result<ChatChunk>>(256);
+    let response_started = Cell::new(false);
 
-    tokio::spawn(async move {
-        let mut pending = String::new();
-        let mut response_started = false;
-        let mut stream = response.bytes_stream();
-
-        use futures::StreamExt;
-
-        while let Some(chunk_result) = stream.next().await {
-            let bytes = match chunk_result {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("stream error: {}", e))).await;
-                    return;
-                }
+    stream_sse_response(response, move |data| {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+            let obj = match json.as_object() {
+                Some(o) => o,
+                None => return HandlerAction::Emit(vec![]),
             };
-
-            let chunk_str = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-                        pending.push_str(&chunk_str);
-
-            // Process complete SSE frames (separated by \n\n)
-            while let Some(idx) = pending.find("\n\n") {
-                let frame = pending[..idx].to_string();
-                pending = pending[idx + 2..].to_string();
-
-                // Parse each data: line in the frame
-                for line in frame.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with(':') {
-                        continue;
-                    }
-                    if let Some(data) = line.strip_prefix("data:") {
-                        let data = data.trim();
-                        if data == "[DONE]" {
-                            return;
-                        }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            let obj = match json.as_object() {
-                                Some(o) => o,
-                                None => continue,
-                            };
-
-                            let result = extract_text_from_event(obj, response_started);
-                            if let Some(text) = result.thinking {
-                                let _ = tx.send(Ok(ChatChunk::Thinking(text))).await;
-                            }
-                            if let Some(text) = result.text {
-                                let _ = tx.send(Ok(ChatChunk::Content(text))).await;
-                            }
-                            if result.response_started {
-                                response_started = true;
-                            }
-                        }
-                    }
-                }
+            let result = extract_text_from_event(obj, response_started.get());
+            let mut chunks = Vec::new();
+            if let Some(text) = result.thinking {
+                chunks.push(Ok(ChatChunk::Thinking(text)));
             }
+            if let Some(text) = result.text {
+                chunks.push(Ok(ChatChunk::Content(text)));
+            }
+            if result.response_started {
+                response_started.set(true);
+            }
+            return HandlerAction::Emit(chunks);
         }
-    });
-
-    Box::pin(ReceiverStream::new(rx))
+        HandlerAction::Emit(vec![])
+    })
 }
 
 struct EventResult {
@@ -519,17 +482,9 @@ fn extract_text_from_event(obj: &serde_json::Map<String, serde_json::Value>, res
             let content = frag.get("content").and_then(|c| c.as_str()).unwrap_or("");
             if !content.is_empty() {
                 if frag_type == "RESPONSE" {
-                    return EventResult {
-                        text: Some(content.to_string()),
-                        thinking: None,
-                        response_started: true,
-                    };
+                    return EventResult { text: Some(content.to_string()), thinking: None, response_started: true };
                 } else if !response_started {
-                    return EventResult {
-                        text: None,
-                        thinking: Some(content.to_string()),
-                        response_started: false,
-                    };
+                    return EventResult { text: None, thinking: Some(content.to_string()), response_started: false };
                 }
             }
         }
@@ -537,8 +492,6 @@ fn extract_text_from_event(obj: &serde_json::Map<String, serde_json::Value>, res
 
     // APPEND patch with fragment array or string value
     if path.starts_with("response/fragments") && op == "APPEND" {
-        // Val can be: array of fragment objects, a single fragment object, or a bare string
-        // Handle bare string val first (e.g. {"p":"response/fragments/-1/content","o":"APPEND","v":"ong"})
         if let Some(text) = val.and_then(|v| v.as_str()) {
             if !text.is_empty() {
                 if !response_started {
@@ -547,16 +500,9 @@ fn extract_text_from_event(obj: &serde_json::Map<String, serde_json::Value>, res
                 return EventResult { text: Some(text.to_string()), thinking: None, response_started: true };
             }
         }
-
-        // Otherwise treat as fragment array/object
         let fragments: Vec<&serde_json::Value> = if let Some(arr) = val.and_then(|v| v.as_array()) {
             arr.iter().collect()
-        } else if let Some(v) = val {
-            vec![v]
-        } else {
-            vec![]
-        };
-
+        } else if let Some(v) = val { vec![v] } else { vec![] };
         for frag in fragments {
             let frag_type = frag.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let content = frag.get("content").and_then(|c| c.as_str()).unwrap_or("");
@@ -609,3 +555,4 @@ fn extract_text_from_event(obj: &serde_json::Map<String, serde_json::Value>, res
 
     EventResult { text: None, thinking: None, response_started }
 }
+

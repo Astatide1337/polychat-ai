@@ -203,6 +203,7 @@ pub trait Provider: Send + Sync + 'static {
         conversation_id: Option<&str>,
     ) -> anyhow::Result<ProviderResponse>;
 }
+pub mod sse;
 pub mod deepseek;
 pub mod claude;
 pub mod chatgpt;

@@ -20,12 +20,11 @@ use anyhow::{bail, Context};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, USER_AGENT};
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use std::time::Duration;
 
 use crate::session::load_session;
 use super::{ChatMessage, ChatOptions, ChatChunk, ModelInfo, ProviderConversation, ChunkStream, ProviderResponse, Provider, ToolCallStrategy};
-use super::ReceiverStream;
 
 // ---------------------------------------------------------------------------
 // Known Gemini models
@@ -637,74 +636,45 @@ fn stream_gemini_chunks(
     response: reqwest::Response,
     meta_tx: Option<oneshot::Sender<String>>,
 ) -> ChunkStream {
-    let (tx, rx) = mpsc::channel::<anyhow::Result<ChatChunk>>(256);
+    use crate::providers::sse::{stream_line_response, HandlerAction};
+    use std::sync::Mutex;
+    use std::cell::Cell;
 
-    tokio::spawn(async move {
-        // Gemini StreamGenerate returns line-delimited JSON chunks, NOT SSE format.
-        // Each chunk is a self-contained JSON array line.
-        // Response looks like:
-        // )]}'\n\n<number>\n[json_array]\n<number>\n[json_array]\n...
-        // The text content is nested inside the JSON at specific positions.
-        //
-        // Gemini sends the full accumulated text in each chunk (not just deltas),
-        // so we track sent_length and only emit the new portion.
-        let mut buffer = String::new();
-        let mut stream = response.bytes_stream();
-        let mut meta_tx = meta_tx; // Take ownership so we can send once
-        let mut sent_length: usize = 0;
-        use futures::StreamExt;
+    let meta_tx = Mutex::new(meta_tx);
+    let sent_length = Cell::new(0usize);
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("Gemini stream error: {}", e))).await;
-                    return;
+    stream_line_response(response, move |data| {
+        // Skip preamble, sizes, etc.
+        if data == ")]}'" || data.chars().all(|c| c.is_ascii_digit()) {
+            return HandlerAction::Emit(vec![]);
+        }
+
+        // Try to parse as JSON array
+        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(data) {
+            let (text, metadata) = parse_gemini_response_line(&arr);
+
+            // Send conversation metadata via oneshot (one-shot, first chunk only)
+            if let Some(meta_json) = metadata {
+                if let Some(tx) = meta_tx.lock().unwrap().take() {
+                    let _ = tx.send(meta_json);
                 }
-            };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            }
 
-            // Process line by line
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
-
-                let trimmed = line.trim();
-                // Skip preamble, sizes, etc.
-                if trimmed.is_empty() || trimmed == ")]}'" || trimmed.chars().all(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-                // Try to parse as JSON array
-                if let Ok(arr) = serde_json::from_str::<Vec<Value>>(trimmed) {
-                    let (text, metadata) = parse_gemini_response_line(&arr);
-
-                    // Send conversation metadata via oneshot (one-shot, first chunk only)
-                    if let Some(meta_json) = metadata {
-                        if let Some(tx) = meta_tx.take() {
-                            let _ = tx.send(meta_json);
-                        }
-                    }
-
-                    // Send text content — only the delta since last send
-                    if let Some(text) = text {
-                        if text.len() > sent_length {
-                            let delta = text[sent_length..].to_string();
-                            if !delta.is_empty() {
-                                let _ = tx.send(Ok(ChatChunk::Content(delta))).await;
-                            }
-                            sent_length = text.len();
-                        }
+            // Send text content — only the delta since last send
+            if let Some(text) = text {
+                let current_len = sent_length.get();
+                if text.len() > current_len {
+                    let delta = text[current_len..].to_string();
+                    sent_length.set(text.len());
+                    if !delta.is_empty() {
+                        return HandlerAction::Emit(vec![Ok(ChatChunk::Content(delta))]);
                     }
                 }
             }
         }
 
-        // If we never captured metadata, drop the oneshot sender so the receiver
-        // gets a RecvError instead of hanging.
-        drop(meta_tx);
-    });
-
-    Box::pin(ReceiverStream::new(rx))
+        HandlerAction::Emit(vec![])
+    })
 }
 
 // ---------------------------------------------------------------------------
