@@ -29,9 +29,7 @@
   "tdd": {
     "phase": "idle",
     "testFiles": [],
-    "sourceFiles": [
-      "/home/sohamb/Desktop/polychat/rust/server/src/routes/emulated_completion.rs"
-    ],
+    "sourceFiles": [],
     "redVerificationPending": false
   },
   "debug": {

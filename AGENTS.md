@@ -67,7 +67,7 @@ gemini.rs Gemini web provider (SNlM0e token from BardChatUi, conversation contin
     keccak.rs     DeepSeekHashV1 — non-standard Keccak variant (see below)
     solver.rs     PoW challenge fetch + solve
 
-test/             Automated test suites: phase1.test.mjs, phase2.test.mjs, phase3.test.mjs
+test/ Production readiness test suite (production-readiness.test.mjs)
 docs/             Provider API research notes (deepseek-api.md, chatgpt-api.md, claude-api.md, kimi-api.md)
 
 ---
@@ -102,16 +102,15 @@ Startup sequence (non-negotiable):
 ### Test suites
 
 ```bash
-# TypeScript automated tests
-node --test test/phase1.test.mjs   # 18 tests — Phase 1 (TUI→Rust migration)
-node --test test/phase2.test.mjs   # 40 tests — Phase 2 (Login infrastructure overhaul)
-node --test test/phase3.test.mjs   # Phase 3 (Provider rollout: Gemini, Kimi)
+```bash
+# TypeScript production readiness tests
+node --test test/production-readiness.test.mjs  # 7 tests
 
 # Rust unit tests
-cd rust && cargo test --bin polychat-server # 97 tests
+cd rust && cargo test --bin polychat-server  # 145 tests
 ```
 
-114 total automated tests across all suites.
+152 total automated tests across all suites.
 
 ---
 
@@ -448,14 +447,13 @@ cd rust && cargo test --bin polychat-server tools::parser
 cd rust && cargo test --bin polychat-server session::tests
 ```
 
-Do NOT run the `.mjs` files in `test/` as automated tests. They are manual probes that hit
-live APIs and produce side effects.
+The `production-readiness.test.mjs` file is a static analysis test suite — it checks source code structure, not runtime behavior. It does NOT hit live APIs.
 
 ### E2E Verification Protocol
 
 Before claiming a change is complete:
 
-1. `cd rust && cargo test --bin polychat-server` — all 97 unit tests must pass
+1. `cd rust && cargo test --bin polychat-server` — all 145 unit tests must pass
 2. `cd rust && cargo build --release` — zero errors (warnings acceptable)
 3. Start the server: `rust/target/release/polychat-server --port 1443`
 4. Run the test matrix using the designated conversation IDs above
