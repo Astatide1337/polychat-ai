@@ -214,7 +214,7 @@ All providers use cookie-based sessions from Firefox profile reading or CDP logi
      conversation metadata at `inner[1]` (cid, rid, rcid)
 - **SNlM0e token**: Extracted from Gemini app page HTML (`"SNlM0e":"<token>"`)
 - **Session expiry**: `__cf_bm` Cloudflare cookies expire in ~30 minutes. Re-run
-  `polychat login gemini` when Gemini returns 403 errors.
+ `polychat login gemini` when Gemini returns 401/403 errors — this is routine, not a blocker (~5 seconds).
 - **Models**: `gemini-3.1-pro`, `gemini-3.1-flash-lite`, `gemini-3-flash`, `gemini-3-pro`, `gemini-2.5-pro`, `gemini-2.5-flash` (static list)
 - **Conversation continuity**: Gemini supports multi-turn conversations via metadata
   passed in `inner_req_list[2]`. The metadata array (cid, rid, rcid, ...) is extracted
@@ -387,7 +387,7 @@ POLYCHAT_TEST_KIMI_CONVERSATION_ID=<your-kimi-test-conversation-id>
 | DeepSeek | ✅ Working | `deepseek-chat` | Use `$POLYCHAT_TEST_DEEPSEEK_CONVERSATION_ID` |
 | Claude | ✅ Working | `claude-sonnet-4-6` | Use `$POLYCHAT_TEST_CLAUDE_CONVERSATION_ID` |
 | ChatGPT | ✅ Working | `gpt-5-mini` | Use `$POLYCHAT_TEST_CHATGPT_CONVERSATION_ID` |
-| Gemini | ✅ Working | `gemini-2.5-flash` | Supports conversation continuity via metadata. Use `provider_conversation_id` to continue an existing conversation. Re-run `polychat login gemini` when SNlM0e expires (~hours) |
+| Gemini | ✅ Working | `gemini-2.5-flash` | Supports conversation continuity via metadata. Use `provider_conversation_id` to continue an existing conversation. Run `polychat login gemini` if session expires (~5s, not a blocker) |
 | Kimi | ✅ Working | `kimi` | Use `$POLYCHAT_TEST_KIMI_CONVERSATION_ID` |
 
 ONLY use ONE singular test conversation and do NOT create new conversations on every request.
@@ -450,6 +450,8 @@ cd rust && cargo test --bin polychat-server session::tests
 The `production-readiness.test.mjs` file is a static analysis test suite — it checks source code structure, not runtime behavior. It does NOT hit live APIs.
 
 ### E2E Verification Protocol
+
+**If any provider returns 401/403 during E2E testing, run `polychat login <provider>` and retry. This is a routine operation (~5 seconds), not a blocker.**
 
 Before claiming a change is complete:
 
@@ -514,9 +516,9 @@ Before claiming a change is complete:
 
 **ChatGPT Cloudflare cookies expire in ~30 minutes.** The Rust server refreshes them by
 collecting `Set-Cookie` from each step of the per-request auth chain. If ChatGPT starts
-returning 403, the session file is stale and `polychat login chatgpt` must be re-run.
+returning 403, run `polychat login chatgpt` — this is routine, not a blocker.
 
-**Gemini session expires.** The `SNlM0e` token is extracted live from `gemini.google.com/app` on each completion. The Google session cookies themselves expire after hours to days. When Gemini returns 401 `session_expired`, re-run `polychat login gemini` (reads fresh cookies from the Zen Firefox profile — takes ~5 seconds).
+**Gemini session expires.** The `SNlM0e` token is extracted live from `gemini.google.com/app` on each completion. The Google session cookies themselves expire after hours to days. When Gemini returns 401 `session_expired`, run `polychat login gemini` (reads fresh cookies from the Zen Firefox profile — takes ~5 seconds). This is a routine operation, not a blocker. AI agents should just run the login command and continue testing.
 
 
 **Kimi conversation list via v2 Connect RPC.** `list_conversations` now uses the v2 Connect RPC endpoint `POST /apiv2/kimi.gateway.chat.v1.ChatService/ListChats` (JSON, `Connect-Protocol-Version: 1`). Completions still create a fresh conversation server-side if no `provider_conversation_id` is provided. Use `provider_conversation_id` to reuse a previously-created conversation.
