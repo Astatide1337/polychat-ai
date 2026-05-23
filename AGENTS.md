@@ -36,7 +36,7 @@ src/
   providers/      TypeScript provider implementations:
                     chatgpt.ts, claude.ts, deepseek.ts, kimi.ts, gemini.ts
   session/        AES-256-GCM session encryption/decryption
-  tui/            Ink-based interactive TUI (React)
+ tui/ Ink-based interactive TUI (React), tool execution (bash/read/write/edit), approval system
   utils/          Binary resolution (binary.ts), PoW solver (deepseek-pow.ts), SSE parser, token estimator
 
 rust/server/src/
@@ -277,6 +277,28 @@ POST /api/generate                Ollama-compatible generate endpoint
 
 All routes except `/health` require `Authorization: Bearer <POLYCHAT_API_KEY>` when
 `POLYCHAT_API_KEY` is set in `.env`.
+
+### TUI Tool Execution
+
+The TUI drives an agentic tool loop when `tools` are sent in the completion request:
+
+1. User types a message
+2. TUI sends completion request with `tools` parameter (4 tool definitions: bash, read, write, edit)
+3. Server routes through emulated completion, parses `<polychat_tool_call>` blocks
+4. Server returns OpenAI-compatible `tool_calls` in the response
+5. TUI executes tool calls locally (with approval based on mode)
+6. TUI sends `role: "tool"` messages with results back to the server
+7. Steps 2-6 repeat until the model returns a final text answer (no tool_calls)
+8. Maximum 20 tool rounds per user message (configurable via `/maxrounds`)
+
+Approval modes:
+- `auto`: all tools execute without confirmation (dangerous)
+- `cautious` (default): `read` auto-approved, `bash`/`write`/`edit` require y/N
+- `ask`: every tool call requires y/N
+
+TUI slash commands for tools: `/mode`, `/tools`, `/maxrounds`
+
+No Rust server changes are needed — the emulated completion system already handles tool-call parsing, validation, and retry.
 
 ### Completion request extensions (beyond OpenAI spec)
 
