@@ -25,6 +25,60 @@ export function createSSEParser(): (raw: string) => ParsedSSEEvent[] {
   };
 }
 
+// ── Tool call accumulator ─────────────────────────────────────────────────────
+
+export interface StreamToolCallDelta {
+  index: number;
+  id?: string;
+  type?: string;
+  function: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+export interface AccumulatedToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export class ToolCallAccumulator {
+  private calls = new Map<number, AccumulatedToolCall>();
+
+  feed(delta: { tool_calls?: StreamToolCallDelta[] }): void {
+    if (!delta.tool_calls) return;
+    for (const tc of delta.tool_calls) {
+      const idx = tc.index;
+      let existing = this.calls.get(idx);
+      if (!existing) {
+        existing = { id: "", type: "function", function: { name: "", arguments: "" } };
+        this.calls.set(idx, existing);
+      }
+      if (tc.id) existing.id = tc.id;
+      if (tc.type) existing.type = tc.type as "function";
+      if (tc.function.name) existing.function.name = tc.function.name;
+      if (tc.function.arguments) existing.function.arguments += tc.function.arguments;
+    }
+  }
+
+  finish(): AccumulatedToolCall[] {
+    const result: AccumulatedToolCall[] = [];
+    const indices = [...this.calls.keys()].sort((a, b) => a - b);
+    for (const idx of indices) {
+      const call = this.calls.get(idx)!;
+      if (call.id && call.function.name) {
+        result.push(call);
+      }
+    }
+    this.calls.clear();
+    return result;
+  }
+}
+
 function parseFrame(frame: string): ParsedSSEEvent | null {
   const lines = frame.split(/\r?\n/);
   const dataLines: string[] = [];
