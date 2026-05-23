@@ -8,3 +8,4 @@ polychat-*.tgz
 artifacts/
 bin/*/polychat-server
 bin/*/polychat-server.exe
+docs/plans/
