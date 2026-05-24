@@ -487,6 +487,9 @@ async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopRe
       case "conversations": await pickConversation(); break;
       case "new": await newConversation(); break;
       case "clear": state.messages.length = 0; state.activeConversationId = null; state.activeConversationTitle = null; process.stdout.write(d("Conversation context cleared.") + "\n\n"); break;
+case "mode": { const modes: ApprovalMode[] = ["auto", "cautious", "ask"]; if (arg && modes.includes(arg as ApprovalMode)) { state.approvalMode = arg as ApprovalMode; process.stdout.write(d("Approval mode: ") + c(state.approvalMode) + "\n"); if (state.approvalMode === "auto") { process.stdout.write(y("\u26a0 All tool calls will execute without confirmation.") + "\n"); } process.stdout.write("\n"); } else { process.stdout.write(d("Current mode: ") + c(state.approvalMode) + "\n"); process.stdout.write(d("Usage: /mode auto | cautious | ask") + "\n\n"); } break; }
+case "tools": process.stdout.write(d("Available tools:") + "\n"); for (const tool of TOOL_DEFINITIONS) { process.stdout.write("  " + g(tool.function.name.padEnd(8)) + " " + d(tool.function.description.split(".")[0]) + "\n"); } process.stdout.write("\n"); break;
+case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) { state.maxToolRounds = n; process.stdout.write(d("Max tool rounds: ") + c(String(state.maxToolRounds)) + "\n\n"); } else { process.stdout.write(d("Current max: ") + c(String(state.maxToolRounds)) + "\n"); process.stdout.write(d("Usage: /maxrounds <number>") + "\n\n"); } break; }
       case "bye": case "quit": case "exit": process.stdout.write("\n"); process.exit(0); break;
       default: process.stdout.write(y(`Unknown command: /${cmd}`) + "  " + d("Type /? for help.") + "\n\n");
     }

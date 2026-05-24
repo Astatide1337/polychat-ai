@@ -285,12 +285,44 @@ fn parse_standalone_tool_call(text: &str) -> Option<(String, String)> {
     parse_tool_block_body(fenced)
 }
 
+/// Normalize parameter-name aliases that models commonly hallucinate.
+/// For example, ChatGPT often sends `{"code": "..."}` instead of `{"command": "..."}`
+/// for the bash tool. This function renames known aliases to their canonical names
+/// so validation passes without requiring retries.
+pub fn normalize_tool_arg_aliases(tool_name: &str, args: &mut Value) {
+    if let Some(map) = args.as_object_mut() {
+        match tool_name {
+            "bash" => {
+                // Models often use `code` or `script` instead of `command`
+                if !map.contains_key("command") {
+                    if let Some(v) = map.remove("code") {
+                        map.insert("command".to_string(), v);
+                    } else if let Some(v) = map.remove("script") {
+                        map.insert("command".to_string(), v);
+                    }
+                }
+            }
+            "write" | "edit" => {
+                // Models sometimes use `file_path` or `file` instead of `path`
+                if !map.contains_key("path") {
+                    if let Some(v) = map.remove("file_path") {
+                        map.insert("path".to_string(), v);
+                    } else if let Some(v) = map.remove("file") {
+                        map.insert("path".to_string(), v);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn validate_emulated_tool_call(
     name: &str,
     arguments: &str,
     tools: &[Value],
     tool_choice: Option<&Value>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     match tool_choice {
         Some(Value::String(choice)) if choice == "none" => {
             return Err("tool choice was `none`, but the model attempted a tool call".into());
@@ -322,8 +354,12 @@ pub fn validate_emulated_tool_call(
         })
         .ok_or_else(|| format!("unknown tool `{}`", name))?;
 
-    let args_value: Value = serde_json::from_str(arguments)
+    let mut args_value: Value = serde_json::from_str(arguments)
         .map_err(|e| format!("tool arguments were not valid JSON: {}", e))?;
+
+    // Normalize known parameter-name aliases that models commonly
+    // hallucinate (e.g. ChatGPT uses `code` for bash's `command`).
+    normalize_tool_arg_aliases(name, &mut args_value);
 
     let schema = tool
         .get("function")
@@ -334,7 +370,9 @@ pub fn validate_emulated_tool_call(
     let mut errors = Vec::new();
     validate_json_schema(&args_value, &schema, "$", &mut errors);
     if errors.is_empty() {
-        Ok(())
+        // Return the normalized arguments so callers (and the TUI) get
+        // correct parameter names instead of hallucinated aliases.
+        Ok(args_value.to_string())
     } else {
         Err(errors.join("; "))
     }

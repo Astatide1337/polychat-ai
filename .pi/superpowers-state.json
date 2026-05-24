@@ -29,7 +29,11 @@
   "tdd": {
     "phase": "idle",
     "testFiles": [],
-    "sourceFiles": [],
+    "sourceFiles": [
+      "/home/sohamb/Desktop/polychat/src/commands/chat.ts",
+      "/home/sohamb/Desktop/polychat/rust/server/src/tools/emulated.rs",
+      "/home/sohamb/Desktop/polychat/rust/server/src/routes/emulated_completion.rs"
+    ],
     "redVerificationPending": false
   },
   "debug": {

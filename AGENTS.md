@@ -409,8 +409,9 @@ POLYCHAT_TEST_KIMI_CONVERSATION_ID=<your-kimi-test-conversation-id>
 | DeepSeek | ✅ Working | `deepseek-chat` | Use `$POLYCHAT_TEST_DEEPSEEK_CONVERSATION_ID` |
 | Claude | ✅ Working | `claude-sonnet-4-6` | Use `$POLYCHAT_TEST_CLAUDE_CONVERSATION_ID` |
 | ChatGPT | ✅ Working | `gpt-5-mini` | Use `$POLYCHAT_TEST_CHATGPT_CONVERSATION_ID` |
-| Gemini | ✅ Working | `gemini-2.5-flash` | Supports conversation continuity via metadata. Use `provider_conversation_id` to continue an existing conversation. Run `polychat login gemini` if session expires (~5s, not a blocker) |
+| Gemini | ✅ Working | `gemini-2.5-flash` | Supports conversation continuity via metadata. Use `provider_conversation_id` to continue an existing conversation. |
 | Kimi | ✅ Working | `kimi` | Use `$POLYCHAT_TEST_KIMI_CONVERSATION_ID` |
+Run `polychat login <provider>` if session expires (~5s, not a blocker)
 
 ONLY use ONE singular test conversation and do NOT create new conversations on every request.
 

@@ -331,8 +331,47 @@ mod validator {
         tool_choice: Option<&Value>,
     ) -> Result<String, String> {
         if !name.is_empty() {
+        // Check if the name matches an available tool directly
+        let available: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+            })
+            .collect();
+
+        if available.contains(&name) {
             return Ok(name.to_string());
         }
+
+        // Known tool-name aliases that models commonly hallucinate
+        let resolved = match name {
+            "python" | "execute" | "shell" | "run" | "terminal" => {
+                // Models often call a code-execution tool instead of bash
+                if available.contains(&"bash") {
+                    Some("bash".to_string())
+                } else {
+                    None
+                }
+            }
+            "cat" | "file" | "head" | "open" => {
+                // Models sometimes use file-reading aliases instead of read
+                if available.contains(&"read") {
+                    Some("read".to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(resolved) = resolved {
+            return Ok(resolved);
+        }
+
+        return Ok(name.to_string());
+    }
         if let Some(Value::Object(obj)) = tool_choice {
             if let Some(name) = obj
                 .get("function")
@@ -767,11 +806,11 @@ async fn run_emulated_completion_loop<S: EmulatedSink>(
                     &tools,
                     body.tool_choice.as_ref(),
                 ) {
-                    Ok(()) => {
+                    Ok(normalized_args) => {
                         if is_exact_consecutive_duplicate_tool_call(
                             &provider_messages,
                             &resolved_name,
-                            &arguments,
+                            &normalized_args,
                         ) {
                             let err = duplicate_tool_call_error(&resolved_name, &arguments);
                             if sink.can_retry() && attempt < 2 {
@@ -1168,7 +1207,6 @@ mod tests {
         should_stream_emulated_incrementally,
     };
     use super::validator::{
-        explicit_tool_request,
         final_answer_claims_external_action,
         final_answer_contains_inline_tool_call_json,
         final_answer_requests_user_supplied_local_inputs,
@@ -1180,6 +1218,7 @@ mod tests {
         should_accept_plain_text_final,
         should_retry_emulated_response,
     };
+    use crate::tools::emulated::validate_emulated_tool_call;
     use crate::providers::ChatMessage;
     use crate::routes::completion_messages::{CompletionMessage, CompletionRequest};
     use serde_json::{Value, json};
@@ -1662,5 +1701,46 @@ mod tests {
         assert!(resolve_emulated_tool_name("", &tools, None)
             .unwrap_err()
             .contains("multiple tools were available"));
+    }
+
+    #[test]
+    fn resolve_tool_name_aliases_python_to_bash() {
+        let tools = vec![
+            json!({ "type": "function", "function": { "name": "bash" } }),
+            json!({ "type": "function", "function": { "name": "read" } }),
+        ];
+        assert_eq!(resolve_emulated_tool_name("python", &tools, None).unwrap(), "bash");
+        assert_eq!(resolve_emulated_tool_name("shell", &tools, None).unwrap(), "bash");
+        assert_eq!(resolve_emulated_tool_name("execute", &tools, None).unwrap(), "bash");
+    }
+
+    #[test]
+    fn resolve_tool_name_aliases_cat_to_read() {
+        let tools = vec![
+            json!({ "type": "function", "function": { "name": "bash" } }),
+            json!({ "type": "function", "function": { "name": "read" } }),
+        ];
+        assert_eq!(resolve_emulated_tool_name("cat", &tools, None).unwrap(), "read");
+        assert_eq!(resolve_emulated_tool_name("open", &tools, None).unwrap(), "read");
+    }
+
+    #[test]
+    fn normalize_arg_aliases_code_to_command() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "command": {"type": "string"} },
+                    "required": ["command"],
+                    "additionalProperties": false
+                }
+            }
+        })];
+        // ChatGPT often sends {"code":"ls"} instead of {"command":"ls"}
+        let result = validate_emulated_tool_call("bash", r#"{"code":"ls"}"#, &tools, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), r#"{"command":"ls"}"#);
     }
 }
