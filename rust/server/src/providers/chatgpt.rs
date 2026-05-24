@@ -84,7 +84,11 @@ fn extract_chatgpt_cookies(session: &Value) -> Option<String> {
                 || name.contains("oai-is")
                 || name.contains("oai-client-auth")
                 || name == "__cf_bm"
-                || name == "__cflb";
+                || name == "__cflb"
+            || name == "cf_clearance"
+            || name == "oai-sc"
+            || name == "_puid"
+            || name == "oai-did";
             if essential {
                 Some(format!("{}={}", name, value))
             } else {
@@ -110,6 +114,21 @@ fn extract_chatgpt_cookies(session: &Value) -> Option<String> {
         result.push_str(pair);
     }
     if result.is_empty() { None } else { Some(result) }
+}
+
+/// Decode the `exp` claim from a JWT access token.
+/// Returns None if the token is not a valid JWT or has no `exp` field.
+fn decode_jwt_exp(token: &str) -> Option<u64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    payload.get("exp")?.as_u64()
 }
 
 fn extract_access_token_from_session(session: &Value) -> Option<String> {
@@ -216,7 +235,6 @@ impl ChatGptProvider {
         let session = load_session("chatgpt")?;
         let mut cookie_header = extract_chatgpt_cookies(&session)
             .context("ChatGPT session has no cookies")?;
-
         let mut access_token = extract_access_token_from_session(&session);
 
         {
@@ -232,14 +250,35 @@ impl ChatGptProvider {
 
             if res.status().is_success() {
                 merge_response_cookies(&mut cookie_header, &res);
-
                 if let Ok(json) = res.json::<Value>().await {
                     update_access_token(&mut access_token, &json);
                 }
+            } else {
+                bail!(
+                    "ChatGPT auth session refresh failed (HTTP {}).                      The session cookies are stale — run `polychat login chatgpt` to refresh.",
+                    res.status()
+                );
             }
         }
 
-        let access_token = access_token.context("ChatGPT session is missing an access token")?;
+        let access_token = access_token.context(
+            "ChatGPT session has no access token.              Run `polychat login chatgpt` to create one.")?;
+
+        // Validate the access token is not expired.
+        // JWT payload (base64): {"exp": <unix_seconds>, ...}
+        if let Some(exp) = decode_jwt_exp(&access_token) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if exp < now {
+                bail!(
+                    "ChatGPT access token expired {} seconds ago.                      Run `polychat login chatgpt` to refresh the session.",
+                    now - exp
+                );
+            }
+        }
+
         Ok(ChatGptAuth { access_token, cookie_header })
     }
 
