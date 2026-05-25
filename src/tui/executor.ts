@@ -97,7 +97,7 @@ async function executeEdit(
         is_error: true,
       };
     }
-    const updated = content.replace(oldText, newText);
+    const updated = content.replace(oldText, () => newText);
     await fs.promises.writeFile(resolved, updated, "utf8");
     return { content: `Edited ${filePath}: replaced 1 occurrence`, is_error: false };
   } catch (err: any) {

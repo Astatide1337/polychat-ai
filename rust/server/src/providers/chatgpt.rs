@@ -123,7 +123,6 @@ fn decode_jwt_exp(token: &str) -> Option<u64> {
     if parts.len() != 3 {
         return None;
     }
-    use base64::Engine;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
         .ok()?;
@@ -255,14 +254,14 @@ impl ChatGptProvider {
                 }
             } else {
                 bail!(
-                    "ChatGPT auth session refresh failed (HTTP {}).                      The session cookies are stale — run `polychat login chatgpt` to refresh.",
+                    "ChatGPT auth session refresh failed (HTTP {}). The session cookies are stale — run `polychat login chatgpt` to refresh.",
                     res.status()
                 );
             }
         }
 
         let access_token = access_token.context(
-            "ChatGPT session has no access token.              Run `polychat login chatgpt` to create one.")?;
+            "ChatGPT session has no access token. Run `polychat login chatgpt` to create one.")?;
 
         // Validate the access token is not expired.
         // JWT payload (base64): {"exp": <unix_seconds>, ...}
@@ -273,7 +272,7 @@ impl ChatGptProvider {
                 .as_secs();
             if exp < now {
                 bail!(
-                    "ChatGPT access token expired {} seconds ago.                      Run `polychat login chatgpt` to refresh the session.",
+                    "ChatGPT access token expired {} seconds ago. Run `polychat login chatgpt` to refresh the session.",
                     now - exp
                 );
             }

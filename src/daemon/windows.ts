@@ -10,7 +10,7 @@ export interface WindowsDaemonOptions {
 }
 
 function generateVbs(opts: WindowsDaemonOptions): string {
-  const exe = opts.binaryPath.replace(/\\/g, "\\\\");
+  const exe = opts.binaryPath;
   return `Set WshShell = CreateObject("WScript.Shell")
 WshShell.Run """${exe}"" --port ${opts.port} --host ${opts.host}", 0, False
 `;

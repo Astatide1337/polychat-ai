@@ -251,6 +251,7 @@ export async function startRepl(initialModel: string): Promise<void> {
   let approvalMode: ApprovalMode = "cautious";
   let maxToolRounds = 20;
   let toolLoopAborted = false;
+  let inToolLoop = false;
   const history = loadHistory();  // loaded once, kept in memory
 
   // ── Connect ──────────────────────────────────────────────────────────────────
@@ -301,6 +302,8 @@ export async function startRepl(initialModel: string): Promise<void> {
       set maxToolRounds(v) { maxToolRounds = v; },
       get toolLoopAborted() { return toolLoopAborted; },
       set toolLoopAborted(v) { toolLoopAborted = v; },
+      get inToolLoop() { return inToolLoop; },
+      set inToolLoop(v) { inToolLoop = v; },
     });
 
 
@@ -336,6 +339,7 @@ interface LoopState {
   approvalMode: ApprovalMode;
   maxToolRounds: number;
   toolLoopAborted: boolean;
+  inToolLoop: boolean;
 }
 
 async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopResult> {
@@ -350,7 +354,7 @@ async function chatLoop(serverUrl: string, state: LoopState): Promise<ChatLoopRe
       rl.prompt();
       return;
     }
-    if (state.toolLoopAborted === false) {
+    if (state.inToolLoop && state.toolLoopAborted === false) {
       state.toolLoopAborted = true;
       process.stdout.write("\n" + y("(agentic loop interrupted)") + "\n\n");
       rl.prompt();
@@ -503,10 +507,13 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
     state.history.push(content);
     process.stdout.write("\n");
     state.toolLoopAborted = false;
+    state.inToolLoop = true;
+    let reachedMaxRounds = true;
 
     for (let round = 0; round < state.maxToolRounds; round++) {
       if (state.toolLoopAborted) {
         state.toolLoopAborted = false;
+        reachedMaxRounds = false;
         process.stdout.write(y("(agentic loop interrupted)") + "\n\n");
         break;
       }
@@ -538,7 +545,8 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
         if (!res.ok || !res.body) {
           const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
           process.stdout.write(r(`\u2717 ${err.error?.message ?? `Server error: ${res.status}`}`) + "\n\n");
-          state.messages.pop();
+          if (round === 0) state.messages.pop();
+          state.inToolLoop = false;
           return;
         }
 
@@ -548,7 +556,17 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            for (const event of parse(dec.decode())) {
+              if (event.data === "[DONE]" || !event.data || typeof event.data !== "object") continue;
+              const delta = (event.data as any).choices?.[0]?.delta;
+              if (!delta) continue;
+              if (delta.tool_calls) { hadToolCalls = true; toolCallAcc.feed(delta); }
+              if (delta.thinking) { writer.writeThinking(delta.thinking); thinking += delta.thinking; }
+              if (delta.content) { writer.write(delta.content); full += delta.content; }
+            }
+            break;
+          }
           for (const event of parse(dec.decode(value, { stream: true }))) {
             if (event.data === "[DONE]" || !event.data || typeof event.data !== "object") continue;
             const delta = (event.data as any).choices?.[0]?.delta;
@@ -568,7 +586,10 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
             for (const tc of toolCalls) {
               const name = tc.function.name;
               let args: Record<string, string>;
-              try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+              try { args = JSON.parse(tc.function.arguments); } catch {
+                state.messages.push({ role: "tool", tool_call_id: tc.id, name, content: `Error: malformed JSON arguments: ${tc.function.arguments}` });
+                continue;
+              }
               const argsPreview = tc.function.arguments.length > 120
                 ? tc.function.arguments.slice(0, 120) + "..." : tc.function.arguments;
               process.stdout.write(y(`\u27e1 ${name}`) + d(` ${argsPreview}`) + "\n");
@@ -606,6 +627,7 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
           process.stdout.write(d(`\n\u25cf ${elapsed.toFixed(1)}s \u00b7 ${responseTokens} response tok${thinkingNote} \u00b7 ${tokensPerSec} tok/s`) + "\n\n");
         }
         if (full) state.messages.push({ role: "assistant", content: full });
+        reachedMaxRounds = false;
         break;
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
@@ -614,12 +636,17 @@ case "maxrounds": { const n = parseInt(arg, 10); if (arg && !isNaN(n) && n > 0) 
           writer.newline(); process.stdout.write(r(`\u2717 ${err instanceof Error ? err.message : String(err)}`) + "\n\n");
           if (round === 0) state.messages.pop();
         }
+        reachedMaxRounds = false;
         break;
       } finally {
         state.streaming = false;
         state.streamAbort = null;
       }
     }
+    if (reachedMaxRounds && !state.toolLoopAborted) {
+      process.stdout.write(y(`(max tool rounds reached: ${state.maxToolRounds})`) + "\n\n");
+    }
+    state.inToolLoop = false;
   }
 
   function askApproval(toolName: string, args: Record<string, string>): Promise<boolean> {

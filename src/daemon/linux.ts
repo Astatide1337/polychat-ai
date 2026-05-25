@@ -22,6 +22,7 @@ Restart=on-failure
 StartLimitBurst=5
 StartLimitIntervalSec=60
 Environment=HOME=${homedir()}
+EnvironmentFile=-%h/.polychat/.env
 
 [Install]
 WantedBy=default.target

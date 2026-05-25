@@ -14,7 +14,15 @@ export interface DaemonConfig {
 
 export function detectPlatform(): DaemonPlatform {
   const platform = process.platform;
-  if (platform === "linux") return "systemd";
+  if (platform === "linux") {
+    if (!existsSync("/run/systemd/systemd")) {
+      throw new Error(
+        "Systemd is not available on this system. " +
+        "On non-systemd Linux (WSL1, Docker, Alpine/OpenRC, etc.), start the server manually: polychat serve"
+      );
+    }
+    return "systemd";
+  }
   if (platform === "darwin") return "launchd";
   if (platform === "win32") return "startup";
   throw new Error(`Unsupported platform for daemon: ${platform}`);

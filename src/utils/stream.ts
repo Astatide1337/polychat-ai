@@ -60,8 +60,10 @@ export class ToolCallAccumulator {
       }
       if (tc.id) existing.id = tc.id;
       if (tc.type) existing.type = tc.type as "function";
-      if (tc.function.name) existing.function.name = tc.function.name;
-      if (tc.function.arguments) existing.function.arguments += tc.function.arguments;
+      if (tc.function) {
+        if (tc.function.name) existing.function.name = tc.function.name;
+        if (tc.function.arguments) existing.function.arguments += tc.function.arguments;
+      }
     }
   }
 
@@ -90,7 +92,7 @@ function parseFrame(frame: string): ParsedSSEEvent | null {
       continue;
     }
     if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
+      dataLines.push(line.slice(5).trim());
     }
   }
   if (dataLines.length === 0 && !eventName) return null;

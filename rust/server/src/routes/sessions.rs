@@ -216,6 +216,8 @@ pub async fn push_session_handler(
 
 pub async fn delete_session_handler(
     Path(provider): Path<String>,
+    providers: Providers,
+    registry: SharedModelRegistry,
 ) -> (StatusCode, Json<Value>) {
     let valid_provider = PROVIDERS.iter().any(|(id, _, _)| *id == provider);
     if !valid_provider {
@@ -239,6 +241,15 @@ pub async fn delete_session_handler(
     }
 
     delete_session(&provider);
+
+    let new_registry = ModelRegistry::build(&providers).await;
+    let new_count = new_registry.len();
+    {
+        let mut guard = registry.write().await;
+        *guard = new_registry;
+    }
+    tracing::info!("Model registry refreshed after session delete: {} models", new_count);
+
     (StatusCode::OK, Json(json!({
         "provider": provider,
         "status": "deleted",

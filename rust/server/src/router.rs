@@ -27,6 +27,7 @@ pub fn build_router(
 ) -> Router {
     let p_health = providers.clone();
     let p_sessions_push = providers.clone();
+    let p_sessions_delete = providers.clone();
     let p_conversations = providers.clone();
     let p_create_convo = providers.clone();
     let p_generate = providers.clone();
@@ -38,6 +39,7 @@ pub fn build_router(
     let r_completions = registry.clone();
     let r_generate = registry.clone();
     let r_sessions = registry.clone();
+    let r_sessions_delete = registry.clone();
 
     Router::new()
         .route("/health", get(move || health::health_handler(p_health.clone())))
@@ -66,7 +68,11 @@ pub fn build_router(
             let r = r_sessions.clone();
             async move { sessions::push_session_handler(path, body, p, r).await }
         }))
-        .route("/v1/sessions/{provider}", delete(sessions::delete_session_handler))
+        .route("/v1/sessions/{provider}", delete(move |path: axum::extract::Path<String>| {
+            let p = p_sessions_delete.clone();
+            let r = r_sessions_delete.clone();
+            async move { sessions::delete_session_handler(path, p, r).await }
+        }))
         .route("/api/generate", post(move |body: axum::Json<generate::GenerateRequest>| {
             let p = p_generate.clone();
             let c = c_generate.clone();

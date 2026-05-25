@@ -1,6 +1,6 @@
 [package]
 name = "polychat-server"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Polychat API server — OpenAI-compatible API for browser-backed subscriptions"
 
