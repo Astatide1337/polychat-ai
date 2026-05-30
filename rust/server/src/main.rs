@@ -2,24 +2,25 @@
 
 mod auth;
 mod config;
+mod mcp;
 mod model_aliases;
+mod pow;
 mod providers;
 mod router;
 mod routes;
 mod session;
 mod tools;
-mod pow;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use providers::Provider;
-use providers::deepseek::DeepSeekProvider;
-use providers::claude::ClaudeProvider;
 use providers::chatgpt::ChatGptProvider;
+use providers::claude::ClaudeProvider;
+use providers::deepseek::DeepSeekProvider;
 use providers::gemini::GeminiProvider;
 use providers::kimi::KimiProvider;
 use routes::model_registry::ModelRegistry;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
