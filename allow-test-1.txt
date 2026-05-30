@@ -1,0 +1,1 @@
+Allow type test 1.
