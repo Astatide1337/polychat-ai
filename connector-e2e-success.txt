@@ -1,1 +1,0 @@
-Connector approval flow verified end-to-end.
