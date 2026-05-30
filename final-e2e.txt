@@ -1,1 +1,0 @@
-Final E2E test — connector approval flow verified.
