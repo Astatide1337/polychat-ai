@@ -246,23 +246,27 @@ export function App() {
     }));
   };
 
-  const sendMessage = async (content: string) => {
-    if (!activeSession || !activeSession.model || isStreaming) return;
-    const userMessage = message("user", content);
+  const sendMessageFromSession = async (
+    sessionSnapshot: ChatSession,
+    content: string,
+    baseMessages: ChatMessage[] = sessionSnapshot.messages,
+    userMessage: ChatMessage = message("user", content),
+  ) => {
+    if (!sessionSnapshot.model || isStreaming) return;
     const assistantMessage = message("assistant", "", {
       status: "streaming",
-      provider: selectedProvider,
-      model: activeSession.model,
+      provider: sessionSnapshot.provider,
+      model: sessionSnapshot.model,
     });
-    const nextTitle = activeSession.messages.length === 0 ? titleFromText(content) : activeSession.title;
-    const requestMessages = [...activeSession.messages, userMessage]
+    const nextTitle = baseMessages.length === 0 ? titleFromText(content) : sessionSnapshot.title;
+    const requestMessages = [...baseMessages, userMessage]
       .filter((item) => item.role === "system" || item.role === "user" || item.role === "assistant" || item.role === "tool")
       .map((item) => ({ role: item.role, content: item.content }));
 
-    updateSession(activeSession.id, (session) => ({
+    updateSession(sessionSnapshot.id, (session) => ({
       ...session,
       title: nextTitle,
-      messages: [...session.messages, userMessage, assistantMessage],
+      messages: [...baseMessages, userMessage, assistantMessage],
       updatedAt: nowIso(),
     }));
 
@@ -275,11 +279,11 @@ export function App() {
 
     try {
       await client.streamChatCompletion({
-        model: activeSession.model,
+        model: sessionSnapshot.model,
         messages: requestMessages,
-        provider_conversation_id: activeSession.temporary ? null : activeSession.providerConversationId,
-        temporary: activeSession.temporary,
-        include_provider_debug: true,
+        provider_conversation_id: sessionSnapshot.temporary ? null : sessionSnapshot.providerConversationId,
+        temporary: sessionSnapshot.temporary,
+        include_provider_debug: false,
       }, {
         signal: controller.signal,
         onContent: (text) => appendAssistant(assistantMessage.id, { content: text }),
@@ -301,6 +305,11 @@ export function App() {
       abortRef.current = null;
       setIsStreaming(false);
     }
+  };
+
+  const sendMessage = async (content: string) => {
+    if (!activeSession || !activeSession.model || isStreaming) return;
+    await sendMessageFromSession(activeSession, content);
   };
 
   const appendAssistant = (messageId: string, patch: { content?: string; thinking?: string }) => {
@@ -332,21 +341,29 @@ export function App() {
 
   const regenerate = () => {
     if (!activeSession || isStreaming) return;
-    const lastUser = [...activeSession.messages].reverse().find((item) => item.role === "user");
+    let lastUserIndex = -1;
+    for (let index = activeSession.messages.length - 1; index >= 0; index -= 1) {
+      if (activeSession.messages[index]?.role === "user") {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex === -1) return;
+    const lastUser = activeSession.messages[lastUserIndex];
     if (!lastUser) return;
-    updateSession(activeSession.id, (session) => ({
-      ...session,
-      messages: session.messages.filter((item) => item.id !== lastUser.id && item.role !== "assistant"),
-      updatedAt: nowIso(),
-    }));
-    void sendMessage(lastUser.content);
+    const trailingMessages = activeSession.messages.slice(lastUserIndex + 1);
+    const trailingAssistantCount = trailingMessages.filter((item) => item.role === "assistant").length;
+    if (trailingAssistantCount === 0) return;
+
+    const baseMessages = activeSession.messages.slice(0, lastUserIndex);
+    void sendMessageFromSession(activeSession, lastUser.content, baseMessages, lastUser);
   };
 
   const requestPreview = {
     model: activeSession?.model,
     provider_conversation_id: activeSession?.temporary ? null : activeSession?.providerConversationId,
     temporary: activeSession?.temporary,
-    include_provider_debug: true,
+    include_provider_debug: false,
     stream: true,
   };
 
@@ -725,7 +742,7 @@ function InspectorPanel(props: {
           <div className="panel-title">Request preview</div>
           <JsonBlock value={props.requestPreview} />
           <div className="panel-title">Provider debug</div>
-          <JsonBlock value={props.debugJson ?? { status: "No provider debug returned yet" }} />
+          <JsonBlock value={props.debugJson ?? { status: "Streaming responses do not include provider debug; use request preview and provider conversation metadata for live inspection." }} />
         </div>
       ) : null}
 

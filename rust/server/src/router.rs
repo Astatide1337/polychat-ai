@@ -1,7 +1,10 @@
 //! Axum router assembly.
 
-use axum::routing::{delete, get, post};
+use axum::http::{StatusCode, Uri};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{delete, get, get_service, post};
 use axum::Router;
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -44,6 +47,35 @@ fn web_dist_dir() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn is_api_like_path(path: &str) -> bool {
+    path.starts_with("/v1/") || path.starts_with("/api/") || path == "/shutdown"
+}
+
+async fn spa_or_api_404(uri: Uri, index: PathBuf) -> Response {
+    if is_api_like_path(uri.path()) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({
+                "error": {
+                    "message": format!("Route not found: {}", uri.path()),
+                    "type": "invalid_request_error",
+                    "code": "route_not_found"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    match tokio::fs::read_to_string(index).await {
+        Ok(body) => Html(body).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Polychat WebUI assets were not found. Run `npm run build:web` before starting the server.",
+        )
+            .into_response(),
+    }
 }
 
 pub fn build_router(
@@ -152,7 +184,9 @@ pub fn build_router(
     if let Some(web_dist) = web_dist_dir() {
         let index = web_dist.join("index.html");
         api_router
-            .fallback_service(ServeDir::new(web_dist).not_found_service(ServeFile::new(index)))
+            .route("/", get_service(ServeFile::new(index.clone())))
+            .nest_service("/assets", ServeDir::new(web_dist.join("assets")))
+            .fallback(move |uri: Uri| spa_or_api_404(uri, index.clone()))
     } else {
         api_router.route(
             "/",

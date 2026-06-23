@@ -15,10 +15,13 @@ function streamResponse() {
 }
 
 describe("App", () => {
+  const chatRequests: unknown[] = [];
+
   beforeEach(() => {
     localStorage.clear();
+    chatRequests.length = 0;
     vi.restoreAllMocks();
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/health")) {
         return Response.json({
@@ -39,6 +42,7 @@ describe("App", () => {
         return Response.json({ provider: "claude", supported: true, conversations: [] });
       }
       if (url.endsWith("/v1/chat/completions")) {
+        if (init?.body) chatRequests.push(JSON.parse(String(init.body)));
         return new Response(streamResponse(), { headers: { "Content-Type": "text/event-stream" } });
       }
       if (url.endsWith("/v1/mcp/servers") || url.endsWith("/v1/mcp/tools")) {
@@ -61,5 +65,31 @@ describe("App", () => {
     await userEvent.type(textarea, "Explain TCP and UDP");
     await userEvent.click(screen.getByTitle("Send"));
     await waitFor(() => expect(screen.getByText("Hello world")).toBeInTheDocument());
+  });
+
+  it("regenerates the last turn without dropping prior assistant context", async () => {
+    render(<App />);
+    const textarea = await screen.findByPlaceholderText("Message Polychat");
+
+    await userEvent.type(textarea, "First turn");
+    await userEvent.click(screen.getByTitle("Send"));
+    await waitFor(() => expect(screen.getByText("Hello world")).toBeInTheDocument());
+
+    await userEvent.type(textarea, "Second turn");
+    await userEvent.click(screen.getByTitle("Send"));
+    await waitFor(() => expect(screen.getAllByText("Hello world")).toHaveLength(2));
+
+    const regenerateButtons = screen.getAllByTitle("Regenerate");
+    await userEvent.click(regenerateButtons[regenerateButtons.length - 1]);
+    await waitFor(() => expect(screen.getAllByText("Hello world")).toHaveLength(2));
+
+    expect(chatRequests).toHaveLength(3);
+    expect(chatRequests[2]).toMatchObject({
+      messages: [
+        { role: "user", content: "First turn" },
+        { role: "assistant", content: "Hello world" },
+        { role: "user", content: "Second turn" },
+      ],
+    });
   });
 });

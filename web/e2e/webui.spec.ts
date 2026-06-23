@@ -43,7 +43,17 @@ async function mockApi(page: import("@playwright/test").Page, mode: "normal" | "
   });
   await page.route("**/v1/mcp/servers", async (route) => route.fulfill({ json: { object: "list", data: [] } }));
   await page.route("**/v1/mcp/tools", async (route) => route.fulfill({ json: { object: "list", data: [] } }));
+  let completionCount = 0;
   await page.route("**/v1/chat/completions", async (route) => {
+    completionCount += 1;
+    const body = route.request().postDataJSON();
+    if (completionCount === 3) {
+      expect(body.messages).toEqual([
+        { role: "user", content: "First turn" },
+        { role: "assistant", content: "Streaming response" },
+        { role: "user", content: "Second turn" },
+      ]);
+    }
     await route.fulfill({
       headers: { "Content-Type": "text/event-stream" },
       body: [
@@ -77,6 +87,23 @@ test("user sends a message and sees streaming response", async ({ page }) => {
   await page.getByPlaceholder("Message Polychat").fill("Explain the difference between TCP and UDP");
   await page.getByTitle("Send").click({ force: true });
   await expect(page.getByText("Streaming response")).toBeVisible();
+});
+
+test("regenerate preserves prior assistant context in a multi-turn chat", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/");
+  await page.getByTitle("Toggle inspector").click();
+
+  await page.getByPlaceholder("Message Polychat").fill("First turn");
+  await page.getByTitle("Send").click({ force: true });
+  await expect(page.getByText("Streaming response")).toBeVisible();
+
+  await page.getByPlaceholder("Message Polychat").fill("Second turn");
+  await page.getByTitle("Send").click({ force: true });
+  await expect(page.getByText("Streaming response")).toHaveCount(2);
+
+  await page.getByTitle("Regenerate").last().click();
+  await expect(page.getByText("Streaming response")).toHaveCount(2);
 });
 
 test("no-provider empty state appears", async ({ page }) => {
