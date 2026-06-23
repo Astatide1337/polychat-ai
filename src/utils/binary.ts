@@ -85,3 +85,20 @@ export async function isServerRunning(url: string, timeoutMs = 1500): Promise<bo
     return false;
   }
 }
+
+export async function isWebUiAvailable(url: string, timeoutMs = 1500): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/html")) return false;
+
+    const body = await res.text();
+    return body.includes("<!doctype html") || body.includes("<!DOCTYPE html");
+  } catch {
+    return false;
+  }
+}
