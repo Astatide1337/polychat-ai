@@ -1,0 +1,45 @@
+{
+  "baseUrl": "http://127.0.0.1:1461",
+  "startedAt": "2026-06-23T17:20:36.880Z",
+  "health": {
+    "status": "ok",
+    "providers": {
+      "chatgpt": {
+        "connected": true,
+        "defaultModel": "gpt-5-5"
+      },
+      "claude": {
+        "connected": true,
+        "defaultModel": "claude-sonnet-4-6"
+      },
+      "deepseek": {
+        "connected": true,
+        "defaultModel": "deepseek-v4-flash"
+      },
+      "gemini": {
+        "connected": true,
+        "defaultModel": "gemini-2.5-flash"
+      },
+      "kimi": {
+        "connected": true,
+        "defaultModel": "kimi"
+      }
+    }
+  },
+  "modelCount": 19,
+  "selectedModel": "deepseek-chat",
+  "selectedProvider": "deepseek",
+  "chatVerified": true,
+  "temporaryVerified": true,
+  "cancellationVerified": true,
+  "screenshots": [
+    "docs/webui-assets/webui-live-status.png",
+    "docs/webui-assets/webui-live-chat.png",
+    "docs/webui-assets/webui-live-debug.png",
+    "docs/webui-assets/webui-live-cancel.png",
+    "docs/webui-assets/webui-live-mcp.png"
+  ],
+  "video": "docs/webui-assets/webui-live-demo.webm",
+  "notes": [],
+  "completedAt": "2026-06-23T17:20:45.606Z"
+}

@@ -18,9 +18,19 @@ function platformTriple(): string {
   if (platform === "win32" && arch === "x64") return "win32-x64";
   return `${platform}-${arch}`;
 }
-function packageRoot(): string {
+export function packageRoot(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   return join(here, "..");
+}
+
+export function resolveWebDist(): string | null {
+  const packaged = join(packageRoot(), "web-dist");
+  if (existsSync(join(packaged, "index.html"))) return packaged;
+
+  const local = join(process.cwd(), "web-dist");
+  if (existsSync(join(local, "index.html"))) return local;
+
+  return null;
 }
 
 function whichSync(name: string): string | null {

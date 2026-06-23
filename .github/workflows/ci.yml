@@ -30,6 +30,15 @@ jobs:
       - name: Run TypeScript tests
         run: node --test test/**/*.test.mjs
 
+      - name: Run WebUI unit tests
+        run: npm run test:web
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run WebUI E2E tests
+        run: npm run test:e2e
+
       - name: Run Rust tests
         working-directory: rust
         run: cargo test --bin polychat-server
@@ -138,7 +147,11 @@ jobs:
       - name: Run package gates
         run: |
           npm run build
+          npm run build:web
           node --test test/**/*.test.mjs
+          npm run test:web
+          npx playwright install --with-deps chromium
+          npm run test:e2e
           cargo test --bin polychat-server --manifest-path rust/Cargo.toml
           npm pack --dry-run
 

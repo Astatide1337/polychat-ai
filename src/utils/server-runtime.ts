@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { isServerRunning, resolveBinary } from "./binary.js";
+import { isServerRunning, resolveBinary, resolveWebDist } from "./binary.js";
 
 export function parsePort(value: string | number): number {
   const port = Number(value);
@@ -44,9 +44,14 @@ export async function startServerProcess(
 ): Promise<{ child: ChildProcess; url: string }> {
   const binary = resolveBinary();
   const url = serverUrl(host, port);
+  const webDist = resolveWebDist();
   const child = spawn(binary, ["--port", String(port), "--host", host], {
     stdio,
     detached: false,
+    env: {
+      ...process.env,
+      ...(webDist ? { POLYCHAT_WEB_DIST: webDist } : {}),
+    },
   });
 
   child.on("error", (err) => {

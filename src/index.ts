@@ -15,6 +15,7 @@ import { registerSessionCommand } from "./commands/session.js";
 import { registerTemporaryCommand } from "./commands/temporary.js";
 import { registerDaemonCommand } from "./commands/daemon.js";
 import { registerVerifyCommand } from "./commands/verify.js";
+import { registerWebCommand } from "./commands/web.js";
 
 const program = new Command();
 
@@ -32,5 +33,6 @@ registerChatCommand(program);
 registerModelsCommand(program);
 registerSessionCommand(program);
 registerVerifyCommand(program);
+registerWebCommand(program);
 
 program.parse(process.argv);

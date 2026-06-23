@@ -14,6 +14,19 @@ const SUPPORTED_TARGETS = [
   { id: "win32-x64", binary: "polychat-server.exe", executable: false },
 ];
 
+const webIndex = join(root, "web-dist", "index.html");
+const webAssets = join(root, "web-dist", "assets");
+
+if (!existsSync(webIndex) || !statSync(webIndex).isFile()) {
+  console.error(`Built WebUI index missing: ${webIndex}`);
+  process.exit(1);
+}
+
+if (!existsSync(webAssets) || !statSync(webAssets).isDirectory()) {
+  console.error(`Built WebUI assets directory missing: ${webAssets}`);
+  process.exit(1);
+}
+
 function currentTargetId() {
   if (process.platform === "linux" && process.arch === "x64") return "linux-x64";
   if (process.platform === "linux" && process.arch === "arm64") return "linux-arm64";

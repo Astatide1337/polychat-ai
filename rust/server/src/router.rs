@@ -1,12 +1,17 @@
 //! Axum router assembly.
 
+use axum::http::{StatusCode, Uri};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{delete, get, get_service, post};
 use axum::Router;
-use axum::routing::{delete, get, post};
+use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{RwLock, oneshot::Sender};
+use tokio::sync::{oneshot::Sender, RwLock};
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 
 use crate::auth::auth_middleware;
@@ -18,6 +23,64 @@ use crate::routes::*;
 
 pub type Providers = Arc<HashMap<String, Arc<dyn Provider>>>;
 pub type SharedModelRegistry = Arc<RwLock<ModelRegistry>>;
+
+fn web_dist_dir() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("POLYCHAT_WEB_DIST") {
+        let candidate = PathBuf::from(path);
+        if candidate.join("index.html").is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let cwd_candidate = PathBuf::from("web-dist");
+    if cwd_candidate.join("index.html").is_file() {
+        return Some(cwd_candidate);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors() {
+            let candidate = ancestor.join("web-dist");
+            if candidate.join("index.html").is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_api_like_path(path: &str) -> bool {
+    path == "/v1"
+        || path.starts_with("/v1/")
+        || path == "/api"
+        || path.starts_with("/api/")
+        || path == "/shutdown"
+}
+
+async fn spa_or_api_404(uri: Uri, index: PathBuf) -> Response {
+    if is_api_like_path(uri.path()) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({
+                "error": {
+                    "message": format!("Route not found: {}", uri.path()),
+                    "type": "invalid_request_error",
+                    "code": "route_not_found"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    match tokio::fs::read_to_string(index).await {
+        Ok(body) => Html(body).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Polychat WebUI assets were not found. Run `npm run build:web` before starting the server.",
+        )
+            .into_response(),
+    }
+}
 
 pub fn build_router(
     providers: Providers,
@@ -41,7 +104,7 @@ pub fn build_router(
     let r_sessions = registry.clone();
     let r_sessions_delete = registry.clone();
 
-    Router::new()
+    let api_router = Router::new()
         .route(
             "/health",
             get(move || health::health_handler(p_health.clone())),
@@ -120,5 +183,23 @@ pub fn build_router(
         })
         .layer(axum::middleware::from_fn(auth_middleware))
         .layer(TimeoutLayer::new(Duration::from_secs(120)))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+
+    if let Some(web_dist) = web_dist_dir() {
+        let index = web_dist.join("index.html");
+        api_router
+            .route("/", get_service(ServeFile::new(index.clone())))
+            .nest_service("/assets", ServeDir::new(web_dist.join("assets")))
+            .fallback(move |uri: Uri| spa_or_api_404(uri, index.clone()))
+    } else {
+        api_router.route(
+            "/",
+            get(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Polychat WebUI assets were not found. Run `npm run build:web` before starting the server.",
+                )
+            }),
+        )
+    }
 }

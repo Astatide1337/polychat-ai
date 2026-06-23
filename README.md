@@ -10,7 +10,7 @@ Polychat is a CLI plus a local OpenAI-compatible server backed by your existing 
 npm install -g polychat-ai
 polychat init
 polychat login claude
-polychat serve
+polychat web
 polychat verify
 ```
 
@@ -57,10 +57,35 @@ polychat logout --all
 polychat status [--check]
 polychat models
 polychat serve [--host <host>] [--port <port>]
+polychat web [--host <host>] [--port <port>] [--no-open]
 polychat chat [--model <id>]
 polychat session export <provider> --api-key <key>
 polychat session push <provider> <server-url> --api-key <key> [--insecure]
 ```
+
+## WebUI
+
+Run the local browser UI with:
+
+```bash
+polychat web
+```
+
+`polychat web` reuses a running server when one is already available. Otherwise it starts the Rust server on the configured host and port, prints the URL, and opens your default browser. Use `polychat web --no-open` to start or reuse the server without launching a browser.
+
+The WebUI is served by the local Rust server and uses the same endpoints as the CLI:
+
+- `/health` for server and provider state
+- `/v1/models` for grouped model selection
+- `/v1/chat/completions` for streaming chat
+- `/v1/conversations?provider=<id>` for provider-side conversations where supported
+- `/v1/mcp/servers` and `/v1/mcp/tools` for MCP visibility
+
+Provider login remains CLI-first. Connect providers with `polychat login <provider>`, then refresh the WebUI. If `POLYCHAT_API_KEY` is set, static WebUI files and `/health` remain public, but protected API calls require the key; the WebUI stores the optional key only in browser local storage.
+
+Temporary mode sends `temporary: true` and avoids binding provider conversations. Actual provider history behavior depends on each provider. Conversation browsing is shown when the selected provider supports listing and has a valid session.
+
+Known v1 limitations: browser-based provider login, file uploads, image uploads, account management, and local shell/file tools are not exposed in the WebUI.
 
 ## Docs
 
