@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { loadConfig } from "../config/index.js";
 import { openUrlInDefaultBrowser } from "../browser/external.js";
-import { isServerRunning, resolveWebDist } from "../utils/binary.js";
+import { isServerRunning, isWebUiAvailable, resolveWebDist } from "../utils/binary.js";
 import { parsePort, serverUrl, startServerProcess } from "../utils/server-runtime.js";
 
 export function registerWebCommand(program: Command) {
@@ -30,8 +30,18 @@ export function registerWebCommand(program: Command) {
       }
 
       if (await isServerRunning(url)) {
-        console.log(`Polychat WebUI available at ${url}`);
-        if (options.open !== false) openUrlInDefaultBrowser(url);
+        if (await isWebUiAvailable(url)) {
+          console.log(`Polychat WebUI available at ${url}`);
+          if (options.open !== false) openUrlInDefaultBrowser(url);
+          return;
+        }
+
+        console.error(
+          `A Polychat server is already running at ${url}, but it is not serving the WebUI.\n` +
+          `Stop the existing server with: curl -X POST ${url}/shutdown\n` +
+          `Then run: node dist/index.js web`,
+        );
+        process.exitCode = 1;
         return;
       }
 
