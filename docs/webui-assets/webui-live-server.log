@@ -1,0 +1,11 @@
+2026-06-23T17:03:56.334346Z  INFO polychat_server: Encryption self-test passed
+2026-06-23T17:03:56.375397Z  INFO polychat_server: ✓ ChatGPT session file present and decryptable
+2026-06-23T17:03:56.432217Z  INFO polychat_server: ✓ Claude session file present and decryptable
+2026-06-23T17:03:56.478379Z  INFO polychat_server: ✓ DeepSeek session file present and decryptable
+2026-06-23T17:03:56.522398Z  INFO polychat_server: ✓ Gemini session file present and decryptable
+2026-06-23T17:03:56.567936Z  INFO polychat_server: ✓ Kimi session file present and decryptable
+2026-06-23T17:03:56.579806Z  INFO polychat_server: 5 provider(s) loaded
+2026-06-23T17:03:57.597907Z  WARN polychat_server::routes::model_registry: chatgpt list_models failed: ChatGPT access token expired 1396259 seconds ago. Run `polychat login chatgpt` to refresh the session.
+2026-06-23T17:03:58.488843Z  INFO polychat_server: Model registry built with 19 models
+2026-06-23T17:03:58.489017Z  INFO polychat_server: Polychat server running at http://127.0.0.1:1461
+Polychat WebUI running at http://127.0.0.1:1461

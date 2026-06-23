@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,6 +71,7 @@ for (const target of selectedTargets()) {
   }
 
   mkdirSync(targetDir, { recursive: true });
+  rmSync(destination, { force: true });
   copyFileSync(source, destination);
   if (!target.binary.endsWith(".exe")) chmodSync(destination, 0o755);
   console.log(`Staged ${target.id}: ${destination}`);
