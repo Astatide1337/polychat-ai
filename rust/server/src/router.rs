@@ -50,7 +50,11 @@ fn web_dist_dir() -> Option<PathBuf> {
 }
 
 fn is_api_like_path(path: &str) -> bool {
-    path.starts_with("/v1/") || path.starts_with("/api/") || path == "/shutdown"
+    path == "/v1"
+        || path.starts_with("/v1/")
+        || path == "/api"
+        || path.starts_with("/api/")
+        || path == "/shutdown"
 }
 
 async fn spa_or_api_404(uri: Uri, index: PathBuf) -> Response {
