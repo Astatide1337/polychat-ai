@@ -1,4 +1,11 @@
-import type { Conversation, IngestRequest, Message, ProviderId, SyncProviderStatus } from "./types.js";
+import type {
+  Conversation,
+  IngestRequest,
+  Message,
+  ProviderId,
+  SearchSyntax,
+  SyncProviderStatus,
+} from "./types.js";
 
 export const SQLITE_SCHEMA_SQL = [
   `CREATE TABLE IF NOT EXISTS conversations (
@@ -124,11 +131,23 @@ export function buildUpsertMessageSql(message: Message): string {
   ].join(" ");
 }
 
+export function buildDeleteMessagesSql(provider: ProviderId, conversationId: string): string {
+  return `
+DELETE FROM messages
+WHERE provider = ${sqlValue(provider)} AND conversation_id = ${sqlValue(conversationId)};
+`.trim();
+}
+
 export function buildUpsertRequestSql(request: IngestRequest): string {
-  return [
+  const statements = [];
+  if (request.replaceMessages !== false) {
+    statements.push(buildDeleteMessagesSql(request.conversation.provider, request.conversation.id));
+  }
+  statements.push(
     buildUpsertConversationSql(request.conversation),
     ...request.messages.map(buildUpsertMessageSql),
-  ].join("\n\n");
+  );
+  return statements.join("\n\n");
 }
 
 export function encodeCursor(value: { updatedAt: string | null; id: string }): string {
@@ -192,9 +211,11 @@ LIMIT 1;
 export function buildSearchQuery(
   query: string,
   provider: ProviderId | undefined,
-  limit: number
+  limit: number,
+  syntax: SearchSyntax = "plain"
 ): string {
   const providerClause = provider ? `AND f.provider = ${sqlValue(provider)}` : "";
+  const normalizedQuery = syntax === "fts" ? query.trim() : normalizePlainSearchQuery(query);
   return `
 WITH ranked AS (
   SELECT
@@ -206,7 +227,7 @@ WITH ranked AS (
     bm25(messages_fts) AS score
   FROM messages_fts f
   JOIN messages m ON m.rowid = f.rowid
-  WHERE messages_fts MATCH ${sqlValue(query)} ${providerClause}
+  WHERE messages_fts MATCH ${sqlValue(normalizedQuery)} ${providerClause}
   ORDER BY score ASC
   LIMIT ${Math.max(1, limit * 5)}
 )
@@ -227,6 +248,18 @@ JOIN conversations c ON c.provider = ranked.provider AND c.id = ranked.conversat
 ORDER BY ranked.score ASC
 LIMIT ${Math.max(1, limit)};
 `.trim();
+}
+
+function normalizePlainSearchQuery(query: string): string {
+  const tokens = query
+    .normalize("NFKC")
+    .match(/[\p{L}\p{N}_]+/gu)
+    ?.filter((token) => token.trim().length > 0) ?? [];
+  if (tokens.length === 0) {
+    const fallback = query.trim();
+    return fallback ? `"${fallback.replace(/"/g, '""')}"` : '""';
+  }
+  return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(" AND ");
 }
 
 export function buildSyncStatusQuery(provider: ProviderId | undefined): string {

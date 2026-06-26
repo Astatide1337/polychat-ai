@@ -79,7 +79,6 @@ export function normalizeChatgptConversation(raw: unknown): { conversation: Conv
   const input = (raw ?? {}) as RawChatGptConversation;
   const conversationId = pickConversationId(input);
   const mapping = input.mapping ?? {};
-  const currentNode = typeof input.current_node === "string" ? input.current_node : null;
   const orderedNodes: Array<[string, RawChatGptNode]> = [];
   const seen = new Set<string>();
 
@@ -90,22 +89,13 @@ export function normalizeChatgptConversation(raw: unknown): { conversation: Conv
     seen.add(nodeId);
     const parent = (node.parent ?? node.parent_id ?? null) as string | null;
     if (parent) visit(parent);
-    orderedNodes.push([nodeId, node]);
+    if (node.message || node.node) {
+      orderedNodes.push([nodeId, node]);
+    }
   }
 
-  if (currentNode) {
-    visit(currentNode);
-  } else {
-    for (const [nodeId, node] of Object.entries(mapping)) {
-      if (node && (node.message || node.node)) {
-        orderedNodes.push([nodeId, node]);
-      }
-    }
-    orderedNodes.sort((a, b) => {
-      const ta = iso(a[1].message?.create_time ?? a[1].node?.create_time) ?? "";
-      const tb = iso(b[1].message?.create_time ?? b[1].node?.create_time) ?? "";
-      return ta.localeCompare(tb);
-    });
+  for (const nodeId of Object.keys(mapping)) {
+    visit(nodeId);
   }
 
   const collected = collectMessages(input);

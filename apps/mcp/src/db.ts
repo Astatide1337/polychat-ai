@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+
+import sqlite3 from "node-sqlite3-wasm";
 
 import {
   buildConversationListQuery,
@@ -18,6 +19,7 @@ import {
   type IngestRequest,
   type Message,
   type ProviderId,
+  type SearchSyntax,
   type SyncProviderStatus,
 } from "@polychat-ai/history-core";
 import { MIGRATION_SQL } from "./migrations.js";
@@ -34,31 +36,28 @@ export type ConversationSearchResult = {
 };
 
 export class SqliteDatabase {
-  constructor(private readonly dbPath: string) {}
+  private readonly db: InstanceType<typeof sqlite3.Database>;
+
+  constructor(dbPath: string) {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    this.db = new sqlite3.Database(dbPath);
+  }
+
+  close(): void {
+    if (this.db.isOpen) {
+      this.db.close();
+    }
+  }
 
   private run(sql: string): void {
-    execFileSync("sqlite3", [this.dbPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-      input: sql,
-      encoding: "utf8",
-    });
+    this.db.exec(sql);
   }
 
   private query<T extends Record<string, unknown>>(sql: string): T[] {
-    const output = execFileSync("sqlite3", ["-json", this.dbPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-      input: sql,
-      encoding: "utf8",
-    }).trim();
-    if (!output) return [];
-    return JSON.parse(output) as T[];
+    return this.db.all(sql) as T[];
   }
 
   ensureSchema(): void {
-    const dir = dirname(this.dbPath);
-    if (!existsSync(dir)) {
-      throw new Error(`database directory does not exist: ${dir}`);
-    }
     this.run(MIGRATION_SQL);
   }
 
@@ -106,9 +105,10 @@ export class SqliteDatabase {
   searchConversations(
     query: string,
     provider: ProviderId | undefined,
-    limit = 10
+    limit = 10,
+    syntax: SearchSyntax = "plain"
   ): ConversationSearchResult[] {
-    const rows = this.query<Record<string, unknown>>(buildSearchQuery(query, provider, limit));
+    const rows = this.query<Record<string, unknown>>(buildSearchQuery(query, provider, limit, syntax));
     const grouped = new Map<string, ConversationSearchResult>();
     for (const row of rows) {
       const conversation = parseConversationRow(row);

@@ -81,6 +81,7 @@ async function main() {
                       provider: { type: "string", enum: ["chatgpt", "claude", "gemini"] },
                       limit: { type: "number" },
                       cursor: { type: "string" },
+                      includeRaw: { type: "boolean" },
                     },
                   },
                 },
@@ -93,6 +94,8 @@ async function main() {
                       query: { type: "string" },
                       provider: { type: "string", enum: ["chatgpt", "claude", "gemini"] },
                       limit: { type: "number" },
+                      syntax: { type: "string", enum: ["plain", "fts"] },
+                      includeRaw: { type: "boolean" },
                     },
                     required: ["query"],
                   },
@@ -106,6 +109,7 @@ async function main() {
                       provider: { type: "string", enum: ["chatgpt", "claude", "gemini"] },
                       conversationId: { type: "string" },
                       includeMessages: { type: "boolean" },
+                      includeRaw: { type: "boolean" },
                     },
                     required: ["provider", "conversationId"],
                   },
@@ -118,6 +122,7 @@ async function main() {
                     properties: {
                       provider: { type: "string", enum: ["chatgpt", "claude", "gemini"] },
                       conversationId: { type: "string" },
+                      includeRaw: { type: "boolean" },
                     },
                     required: ["provider", "conversationId"],
                   },
@@ -160,6 +165,7 @@ async function main() {
                   provider,
                   limit: typeof args.limit === "number" ? args.limit : undefined,
                   cursor: typeof args.cursor === "string" ? args.cursor : undefined,
+                  includeRaw: args.includeRaw === undefined ? undefined : Boolean(args.includeRaw),
                 })
               : name === "search_conversations"
                 ? typeof args.query === "string" && args.query.trim()
@@ -167,24 +173,28 @@ async function main() {
                       query: args.query,
                       provider,
                       limit: typeof args.limit === "number" ? args.limit : undefined,
+                      syntax: args.syntax === "fts" ? "fts" : "plain",
+                      includeRaw: args.includeRaw === undefined ? undefined : Boolean(args.includeRaw),
                     })
                   : invalidParams(request.id, "search_conversations requires query")
                 : name === "get_conversation"
                   ? provider && typeof args.conversationId === "string" && args.conversationId.trim()
                     ? getConversationTool(db, {
-                        provider,
-                        conversationId: args.conversationId,
-                        includeMessages: args.includeMessages === undefined ? undefined : Boolean(args.includeMessages),
-                      })
+                      provider,
+                      conversationId: args.conversationId,
+                      includeMessages: args.includeMessages === undefined ? undefined : Boolean(args.includeMessages),
+                      includeRaw: args.includeRaw === undefined ? undefined : Boolean(args.includeRaw),
+                    })
                     : invalidParams(request.id, "get_conversation requires provider and conversationId")
                   : name === "get_messages"
-                    ? provider && typeof args.conversationId === "string" && args.conversationId.trim()
-                      ? getMessagesTool(db, {
-                          provider,
-                          conversationId: args.conversationId,
-                        })
-                      : invalidParams(request.id, "get_messages requires provider and conversationId")
-                    : name === "sync_status"
+                  ? provider && typeof args.conversationId === "string" && args.conversationId.trim()
+                    ? getMessagesTool(db, {
+                      provider,
+                      conversationId: args.conversationId,
+                      includeRaw: args.includeRaw === undefined ? undefined : Boolean(args.includeRaw),
+                    })
+                    : invalidParams(request.id, "get_messages requires provider and conversationId")
+                  : name === "sync_status"
                       ? syncStatusTool(db, { provider })
                       : null;
           if (!result) {
@@ -227,11 +237,13 @@ async function main() {
 
   process.on("SIGINT", () => {
     server.close();
+    db.close();
     rl.close();
     process.exit(0);
   });
   process.on("SIGTERM", () => {
     server.close();
+    db.close();
     rl.close();
     process.exit(0);
   });

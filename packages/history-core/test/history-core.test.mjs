@@ -157,6 +157,14 @@ test("normalizes chatgpt fixture", () => {
   assert.equal(normalized.messages[0].role, "user");
 });
 
+test("normalizes chatgpt branch fixtures and keeps regenerated nodes", () => {
+  const raw = fixture("chatgpt-branch-conversation.json");
+  const normalized = normalizeChatgptConversation(raw);
+  assert.equal(normalized.conversation.provider, "chatgpt");
+  assert.equal(normalized.messages.length, 3);
+  assert.match(normalized.messages.map((message) => message.content).join("\n"), /regeneration/);
+});
+
 test("normalizes claude fixture", () => {
   const raw = fixture("claude-conversation.json");
   const normalized = normalizeClaudeConversation(raw);

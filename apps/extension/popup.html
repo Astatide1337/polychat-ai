@@ -310,22 +310,24 @@
 
           <div class="divider"></div>
 
-          <label>
-            <span class="field-label">ChatGPT test id</span>
-            <input id="testChatgpt" placeholder="POLYCHAT_TEST_CHATGPT_CONVERSATION_ID" />
-          </label>
-          <label>
-            <span class="field-label">Claude test id</span>
-            <input id="testClaude" placeholder="POLYCHAT_TEST_CLAUDE_CONVERSATION_ID" />
-          </label>
-          <label>
-            <span class="field-label">Gemini test id</span>
-            <input id="testGemini" placeholder="POLYCHAT_TEST_GEMINI_CONVERSATION_ID" />
-          </label>
-          <div class="row">
-            <button class="ghost" id="sync-test-chatgpt" type="button">ChatGPT</button>
-            <button class="ghost" id="sync-test-claude" type="button">Claude</button>
-            <button class="ghost" id="sync-test-gemini" type="button">Gemini</button>
+          <div data-test-only>
+            <label>
+              <span class="field-label">ChatGPT test id</span>
+              <input id="testChatgpt" placeholder="POLYCHAT_TEST_CHATGPT_CONVERSATION_ID" />
+            </label>
+            <label>
+              <span class="field-label">Claude test id</span>
+              <input id="testClaude" placeholder="POLYCHAT_TEST_CLAUDE_CONVERSATION_ID" />
+            </label>
+            <label>
+              <span class="field-label">Gemini test id</span>
+              <input id="testGemini" placeholder="POLYCHAT_TEST_GEMINI_CONVERSATION_ID" />
+            </label>
+            <div class="row">
+              <button class="ghost" id="sync-test-chatgpt" type="button">ChatGPT</button>
+              <button class="ghost" id="sync-test-claude" type="button">Claude</button>
+              <button class="ghost" id="sync-test-gemini" type="button">Gemini</button>
+            </div>
           </div>
         </div>
       </details>

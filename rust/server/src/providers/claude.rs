@@ -13,6 +13,9 @@ use uuid::Uuid;
 use crate::providers::*;
 use crate::session::load_session;
 
+const CLAUDE_PAGE_SIZE: usize = 100;
+const CLAUDE_MAX_PAGES: usize = 20;
+
 // ---------------------------------------------------------------------------
 // Known Claude models
 // ---------------------------------------------------------------------------
@@ -109,6 +112,59 @@ impl ClaudeProvider {
                 .build()
                 .expect("building reqwest client"),
         }
+    }
+
+    async fn fetch_claude_conversations(&self, auth: &ClaudeAuth) -> anyhow::Result<Vec<Value>> {
+        let headers = build_claude_headers(&auth.cookie_header);
+        let mut conversations = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut offset = 0usize;
+
+        for _ in 0..CLAUDE_MAX_PAGES {
+            let res = self
+                .client
+                .get(&format!(
+                    "https://claude.ai/api/organizations/{}/chat_conversations?offset={offset}&limit={CLAUDE_PAGE_SIZE}",
+                    auth.org_id
+                ))
+                .headers(headers.clone())
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .context("listing Claude conversations")?;
+
+            if !res.status().is_success() {
+                bail!("Claude conversation list request failed: {}", res.status());
+            }
+
+            let page: Vec<Value> = res.json().await.context("parsing Claude conversations")?;
+            if page.is_empty() {
+                break;
+            }
+
+            let page_len = page.len();
+            let mut added = 0usize;
+            for item in page {
+                let id = item
+                    .get("uuid")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() || !seen_ids.insert(id) {
+                    continue;
+                }
+                conversations.push(item);
+                added += 1;
+            }
+
+            if added == 0 || page_len < CLAUDE_PAGE_SIZE {
+                break;
+            }
+            offset += page_len;
+        }
+
+        Ok(conversations)
     }
 
     async fn get_auth(&self) -> anyhow::Result<ClaudeAuth> {
@@ -215,49 +271,17 @@ impl Provider for ClaudeProvider {
 
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
         let auth = self.get_auth().await?;
-        let headers = build_claude_headers(&auth.cookie_header);
-
-        let res = self
-            .client
-            .get(&format!(
-                "https://claude.ai/api/organizations/{}/chat_conversations?limit=100",
-                auth.org_id
-            ))
-            .headers(headers)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .context("listing Claude conversations for model discovery")?;
-
-        if !res.status().is_success() {
-            bail!("Claude conversation list request failed: {}", res.status());
-        }
-
-        let convos: Vec<Value> = res.json().await?;
+        let convos = self.fetch_claude_conversations(&auth).await?;
         Ok(normalize_claude_models(&convos))
     }
 
     async fn list_conversations(&self) -> anyhow::Result<Vec<ProviderConversation>> {
         let auth = self.get_auth().await?;
-        let headers = build_claude_headers(&auth.cookie_header);
+        let payload = match self.fetch_claude_conversations(&auth).await {
+            Ok(payload) => payload,
+            Err(_) => return Ok(vec![]),
+        };
 
-        let res = self
-            .client
-            .get(&format!(
-                "https://claude.ai/api/organizations/{}/chat_conversations",
-                auth.org_id
-            ))
-            .headers(headers)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .context("listing Claude conversations")?;
-
-        if !res.status().is_success() {
-            return Ok(vec![]);
-        }
-
-        let payload: Vec<Value> = res.json().await?;
         let mut convos = Vec::new();
         for item in &payload {
             let id = item

@@ -105,8 +105,13 @@ export function parseIngestRequest(value: unknown): IngestRequest {
   if (!Array.isArray(messagesRaw)) {
     throw new TypeError("messages must be an array");
   }
+  const replaceMessages = input.replaceMessages;
+  if (replaceMessages !== undefined && typeof replaceMessages !== "boolean") {
+    throw new TypeError("replaceMessages must be a boolean");
+  }
   return {
     conversation,
     messages: messagesRaw.map(parseMessage),
+    replaceMessages,
   };
 }

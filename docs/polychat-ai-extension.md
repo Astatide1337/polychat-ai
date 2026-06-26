@@ -13,6 +13,7 @@ npm --workspace apps/extension run build
 Load the unpacked extension from `apps/extension/dist` in Chromium-based browsers.
 
 The manifest includes the provider hosts plus local `127.0.0.1` and `localhost` access for the ingest API.
+Remote HTTPS ingest hosts are requested explicitly from the popup when you save a remote MCP server URL.
 
 ## Configure
 
@@ -27,6 +28,7 @@ Open the popup and set:
 
 The popup also exposes provider sync buttons and the latest sync result.
 It now also includes a direct conversation sync control for targeted verification.
+The test-only conversation sync controls and URL-driven auto-test flow are only enabled when the extension is built with `POLYCHAT_EXTENSION_TEST_MODE=1`.
 
 ## Current behavior
 

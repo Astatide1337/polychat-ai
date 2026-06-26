@@ -1,4 +1,5 @@
 export type ProviderId = "chatgpt" | "claude" | "gemini";
+export type SearchSyntax = "plain" | "fts";
 
 export type MessageRole = "user" | "assistant" | "system" | "tool" | "unknown";
 
@@ -36,6 +37,7 @@ export type ConversationSummary = Pick<
 export type IngestRequest = {
   conversation: Conversation;
   messages: Message[];
+  replaceMessages?: boolean;
 };
 
 export type SyncProviderStatus = {

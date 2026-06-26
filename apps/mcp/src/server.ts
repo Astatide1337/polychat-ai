@@ -6,10 +6,25 @@ import type { McpAppConfig } from "./config.js";
 import { createIngestHandlers } from "./ingest.js";
 import type { SqliteDatabase } from "./db.js";
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+class PayloadTooLargeError extends Error {
+  statusCode = 413;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) {
+      throw new PayloadTooLargeError(`request body exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(buffer);
   }
   if (chunks.length === 0) return null;
   const text = Buffer.concat(chunks).toString("utf8");
@@ -41,15 +56,23 @@ export function startHttpServer(config: McpAppConfig, db: SqliteDatabase) {
         return sendJson(res, response.status, response.body);
       }
       if (req.method === "POST" && url.pathname === "/ingest/conversation") {
-        const response = handlers.conversation(req.headers, await readJsonBody(req));
+        const response = handlers.conversation(req.headers, await readJsonBody(req, config.ingestMaxBodyBytes));
         return sendJson(res, response.status, response.body);
       }
       if (req.method === "POST" && url.pathname === "/ingest/batch") {
-        const response = handlers.batch(req.headers, await readJsonBody(req));
+        const response = handlers.batch(req.headers, await readJsonBody(req, config.ingestMaxBodyBytes));
         return sendJson(res, response.status, response.body);
       }
       sendJson(res, 404, { ok: false, error: "not_found" });
     } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        sendJson(res, error.statusCode, {
+          ok: false,
+          error: "payload_too_large",
+          limitBytes: config.ingestMaxBodyBytes,
+        });
+        return;
+      }
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
   });

@@ -264,3 +264,37 @@ export async function tabsReload(tabId: number): Promise<void> {
     });
   });
 }
+
+export async function permissionsRequest(request: {
+  origins?: string[];
+  permissions?: string[];
+}): Promise<boolean> {
+  const browserApi = typeof browser !== "undefined"
+    ? (browser as
+        | {
+            permissions?: {
+              request(params: { origins?: string[]; permissions?: string[] }): Promise<boolean>;
+            };
+          }
+        | undefined)
+    : undefined;
+  const browserResult = browserApi?.permissions?.request?.(request);
+  if (browserResult && typeof browserResult.then === "function") {
+    return browserResult;
+  }
+
+  const api = getApi();
+  if (!api?.permissions?.request) {
+    throw new Error("permissions API is unavailable");
+  }
+  return await new Promise<boolean>((resolve, reject) => {
+    api.permissions.request(request, (granted: boolean) => {
+      const error = getLastError();
+      if (error) {
+        reject(new Error(error));
+        return;
+      }
+      resolve(Boolean(granted));
+    });
+  });
+}

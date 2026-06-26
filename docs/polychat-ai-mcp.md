@@ -1,6 +1,7 @@
 # Polychat-AI MCP
 
 The MCP app stores synced transcripts in SQLite and exposes them through MCP tools, resources, and an HTTP ingest API.
+It uses an in-process SQLite binding rather than shelling out to the `sqlite3` CLI.
 
 ## Build
 
@@ -34,6 +35,12 @@ The ingest endpoints require:
 Authorization: Bearer <POLYCHAT_AI_INGEST_TOKEN>
 ```
 
+The ingest server enforces a request body cap via `POLYCHAT_AI_INGEST_MAX_BODY_BYTES`
+and defaults to 50 MiB.
+
+Ingest requests replace existing messages for a conversation unless
+`replaceMessages` is set to `false`. Use that flag for metadata-only refreshes.
+
 ## MCP tools
 
 - `list_conversations`
@@ -41,6 +48,12 @@ Authorization: Bearer <POLYCHAT_AI_INGEST_TOKEN>
 - `get_conversation`
 - `get_messages`
 - `sync_status`
+
+The transcript tools omit raw provider payloads by default. Pass `includeRaw: true`
+when you explicitly need the provider JSON.
+
+`search_conversations` defaults to safe plain-text search. Pass `syntax: "fts"`
+if you want raw FTS5 syntax.
 
 ## MCP resources
 

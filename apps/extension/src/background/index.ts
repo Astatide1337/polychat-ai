@@ -63,6 +63,7 @@ function getE2EParamsFromUrl(url: string): URLSearchParams | null {
 }
 
 async function runE2ESyncFromOpenTabs(source: string): Promise<boolean> {
+  if (!process.env.POLYCHAT_EXTENSION_TEST_MODE) return false;
   const tabs = await tabsQuery({});
   console.info("[polychat-ai] e2e tab scan", { source, tabs: tabs.length });
   for (const tab of tabs) {
@@ -88,6 +89,7 @@ async function runE2ESyncFromOpenTabs(source: string): Promise<boolean> {
 }
 
 async function retryE2ESyncFromOpenTabs(source: string): Promise<void> {
+  if (!process.env.POLYCHAT_EXTENSION_TEST_MODE) return;
   for (let attempt = 1; attempt <= E2E_SCAN_ATTEMPTS; attempt += 1) {
     try {
       if (await runE2ESyncFromOpenTabs(`${source}:${attempt}`)) return;
@@ -105,10 +107,12 @@ async function retryE2ESyncFromOpenTabs(source: string): Promise<void> {
   console.info("[polychat-ai] e2e trigger not found", { source });
 }
 
-chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason !== "install" && details.reason !== "update") return;
-  void retryE2ESyncFromOpenTabs(`installed:${details.reason}`);
-});
+if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason !== "install" && details.reason !== "update") return;
+    void retryE2ESyncFromOpenTabs(`installed:${details.reason}`);
+  });
+}
 
 function rememberAutoIngest(provider: string, conversationId: string | null, url: string): boolean {
   const key = [provider, conversationId || "", url].join("|");
@@ -156,6 +160,11 @@ async function syncSnapshot(provider: ProviderId, snapshot: any, serverUrl: stri
       )
     : [];
   const request: IngestRequest = { conversation, messages };
+  if (messages.length > 0) {
+    request.replaceMessages = true;
+  } else {
+    request.replaceMessages = false;
+  }
   await postConversation({ serverUrl, ingestToken }, request);
   return request;
 }
@@ -180,6 +189,7 @@ async function syncProvider(provider: ProviderId): Promise<SyncResult> {
       batch.push({
         conversation: detail.conversation,
         messages: detail.messages,
+        replaceMessages: true,
       });
     } catch (error) {
       batch.push({
@@ -195,6 +205,7 @@ async function syncProvider(provider: ProviderId): Promise<SyncResult> {
           raw: summary.raw,
         }),
         messages: [],
+        replaceMessages: false,
       });
       await saveSettings({
         lastResult: `${provider} detail fetch failed for ${summary.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -203,9 +214,10 @@ async function syncProvider(provider: ProviderId): Promise<SyncResult> {
   }
 
   await postBatch({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, batch);
+  const maybeTruncated = provider === "claude" && conversations.length === 100;
   await saveSettings({
     lastSyncAt: new Date().toISOString(),
-    lastResult: `Synced ${batch.length} ${provider} conversations.`,
+    lastResult: `Synced ${batch.length} ${provider} conversations.${maybeTruncated ? " Provider may be truncated." : ""}`,
   });
   return { ok: true, count: batch.length };
 }
@@ -222,6 +234,7 @@ async function syncConversation(provider: ProviderId, conversationId: string): P
     {
       conversation: detail.conversation,
       messages: detail.messages,
+      replaceMessages: true,
     }
   );
   await saveSettings({
@@ -298,26 +311,28 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
       const senderTabId = typeof senderTab?.id === "number" && senderTab.id >= 0 ? senderTab.id : null;
       const url = typeof (typed as { url?: string }).url === "string" ? (typed as { url?: string }).url : "";
       if (url.includes("polychat-auto")) return;
-      const e2eParams = getE2EParamsFromUrl(url);
-      if (e2eParams) {
-        const serverUrl = e2eParams.get("serverUrl") || settings.serverUrl;
-        const ingestToken = e2eParams.get("ingestToken") || settings.ingestToken;
-        await saveSettings({ serverUrl, ingestToken });
-        try {
-          const result = await syncAll();
-          await saveSettings({
-            lastSyncAt: new Date().toISOString(),
-            lastResult: result.errors?.length
-              ? `E2E synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
-              : `E2E synced ${result.count} conversations across providers.`,
-          });
-        } catch (error) {
-          await saveSettings({
-            lastSyncAt: new Date().toISOString(),
-            lastResult: `E2E sync failed: ${error instanceof Error ? error.message : String(error)}`,
-          });
+      if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
+        const e2eParams = getE2EParamsFromUrl(url);
+        if (e2eParams) {
+          const serverUrl = e2eParams.get("serverUrl") || settings.serverUrl;
+          const ingestToken = e2eParams.get("ingestToken") || settings.ingestToken;
+          await saveSettings({ serverUrl, ingestToken });
+          try {
+            const result = await syncAll();
+            await saveSettings({
+              lastSyncAt: new Date().toISOString(),
+              lastResult: result.errors?.length
+                ? `E2E synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
+                : `E2E synced ${result.count} conversations across providers.`,
+            });
+          } catch (error) {
+            await saveSettings({
+              lastSyncAt: new Date().toISOString(),
+              lastResult: `E2E sync failed: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+          return;
         }
-        return;
       }
       const conversationId = typeof (typed as { conversationId?: string | null }).conversationId === "string"
         ? (typed as { conversationId?: string }).conversationId

@@ -6,12 +6,19 @@ export type McpAppConfig = {
   ingestToken: string;
   ingestHost: string;
   ingestPort: number;
+  ingestMaxBodyBytes: number;
 };
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function loadConfig(): McpAppConfig {
@@ -22,5 +29,9 @@ export function loadConfig(): McpAppConfig {
     ingestToken: process.env.POLYCHAT_AI_INGEST_TOKEN ?? "",
     ingestHost: process.env.POLYCHAT_AI_INGEST_HOST ?? "127.0.0.1",
     ingestPort: parsePort(process.env.POLYCHAT_AI_INGEST_PORT, 3333),
+    ingestMaxBodyBytes: parsePositiveInteger(
+      process.env.POLYCHAT_AI_INGEST_MAX_BODY_BYTES,
+      50 * 1024 * 1024
+    ),
   };
 }
