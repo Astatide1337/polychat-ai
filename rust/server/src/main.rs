@@ -11,12 +11,12 @@ mod routes;
 mod session;
 mod tools;
 
-use providers::Provider;
 use providers::chatgpt::ChatGptProvider;
 use providers::claude::ClaudeProvider;
 use providers::deepseek::DeepSeekProvider;
 use providers::gemini::GeminiProvider;
 use providers::kimi::KimiProvider;
+use providers::Provider;
 use routes::model_registry::ModelRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;

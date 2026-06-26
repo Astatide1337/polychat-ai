@@ -8,7 +8,9 @@
 //! - POST /apiv2/kimi.gateway.chat.v1.ChatService/ListChats (v2 Connect RPC)
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, USER_AGENT,
+};
 use serde_json::{json, Value};
 
 use crate::providers::*;
@@ -142,7 +144,9 @@ impl Provider for KimiProvider {
         "Kimi"
     }
 
-    fn tool_call_strategy(&self) -> ToolCallStrategy { ToolCallStrategy::Emulated }
+    fn tool_call_strategy(&self) -> ToolCallStrategy {
+        ToolCallStrategy::Emulated
+    }
 
     async fn validate_session(&self) -> bool {
         let headers = match self.auth_headers().await {
@@ -222,21 +226,42 @@ impl Provider for KimiProvider {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
-            bail!("Kimi ListChats failed: {} {}", status, kimi_error_snippet(&text));
+            bail!(
+                "Kimi ListChats failed: {} {}",
+                status,
+                kimi_error_snippet(&text)
+            );
         }
 
-        let data: Value = res.json().await.context("parsing Kimi ListChats response")?;
-        let chats = data.get("chats").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let data: Value = res
+            .json()
+            .await
+            .context("parsing Kimi ListChats response")?;
+        let chats = data
+            .get("chats")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let conversations = chats
             .iter()
             .filter_map(|c| {
-                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = c
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if id.is_empty() {
                     return None;
                 }
-                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").trim().to_string();
-                let updated_at = c.get("updateTime")
+                let name = c
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled")
+                    .trim()
+                    .to_string();
+                let updated_at = c
+                    .get("updateTime")
                     .or_else(|| c.get("createTime"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
@@ -288,7 +313,10 @@ impl Provider for KimiProvider {
             );
         }
 
-        let body: Value = res.json().await.context("parsing Kimi create conversation response")?;
+        let body: Value = res
+            .json()
+            .await
+            .context("parsing Kimi create conversation response")?;
         let id = body
             .get("id")
             .and_then(|v| v.as_str())
@@ -414,4 +442,3 @@ fn stream_kimi_chunks(response: reqwest::Response) -> ChunkStream {
         }
     })
 }
-

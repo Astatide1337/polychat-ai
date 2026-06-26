@@ -56,14 +56,14 @@ export function resolveBinary(): string {
     return envOverride;
   }
 
+  const localBuild = join(packageRoot(), "rust", "target", "release", BIN);
+  if (existsSync(localBuild)) return localBuild;
+
   const packaged = join(packageRoot(), "bin", platformTriple(), BIN);
   if (existsSync(packaged)) return packaged;
 
   const onPath = whichSync(BINARY_NAME);
   if (onPath) return onPath;
-
-  const localBuild = join(packageRoot(), "rust", "target", "release", BIN);
-  if (existsSync(localBuild)) return localBuild;
 
   throw new Error(
     `polychat-server binary not found.\n` +

@@ -1,11 +1,11 @@
 //! Cached model registry — built at startup, refreshed on session push.
 
-use std::sync::Arc;
-use tokio::time::{Duration, timeout};
 use crate::model_aliases::model_matches;
 use crate::providers::{ModelInfo, Provider};
 use crate::router::Providers;
 use crate::session::has_session;
+use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 
 struct RegistryEntry {
     provider_id: String,
@@ -20,7 +20,9 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Build the registry by calling list_models on each connected provider.

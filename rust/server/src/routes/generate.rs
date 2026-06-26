@@ -11,8 +11,8 @@ use serde_json::json;
 
 use crate::config::PolychatConfig;
 use crate::providers::{ChatChunk, ChatMessage, ChatOptions};
-use crate::routes::errors::RouteError;
 use crate::router::{Providers, SharedModelRegistry};
+use crate::routes::errors::RouteError;
 
 #[derive(Deserialize)]
 pub struct GenerateRequest {
@@ -56,12 +56,15 @@ pub async fn generate_handler(
                     format!("Model '{}' not found", body.model),
                     "invalid_request_error",
                     "model_not_found",
-                ).into_response();
+                )
+                .into_response();
             }
         }
     };
 
-    let config_temporary = config.providers.get(&provider_id)
+    let config_temporary = config
+        .providers
+        .get(&provider_id)
         .map(|pc| pc.temporary)
         .unwrap_or(false);
 
@@ -74,7 +77,10 @@ pub async fn generate_handler(
         temporary: body.temporary || config_temporary,
     };
 
-    let provider_response = match provider.send_message(&messages, &body.model, &options, None).await {
+    let provider_response = match provider
+        .send_message(&messages, &body.model, &options, None)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return RouteError::new(
@@ -82,7 +88,8 @@ pub async fn generate_handler(
                 e.to_string(),
                 "upstream_error",
                 "upstream_error",
-            ).into_response();
+            )
+            .into_response();
         }
     };
     let chunk_stream = provider_response.stream;
@@ -90,7 +97,9 @@ pub async fn generate_handler(
     if body.stream {
         stream_ollama_response(chunk_stream, &body.model).into_response()
     } else {
-        non_stream_ollama_response(chunk_stream, &body.model).await.into_response()
+        non_stream_ollama_response(chunk_stream, &body.model)
+            .await
+            .into_response()
     }
 }
 
@@ -110,7 +119,9 @@ fn stream_ollama_response(
                         "created_at": chrono::Utc::now().to_rfc3339(),
                         "response": text,
                         "done": false,
-                    }).to_string() + "\n";
+                    })
+                    .to_string()
+                        + "\n";
                     let _ = tx.send(Ok(line)).await;
                 }
                 Ok(ChatChunk::Thinking(_)) => {}
@@ -124,7 +135,9 @@ fn stream_ollama_response(
             "response": "",
             "done": true,
             "done_reason": "stop",
-        }).to_string() + "\n";
+        })
+        .to_string()
+            + "\n";
         let _ = tx.send(Ok(done_line)).await;
     });
 
@@ -165,8 +178,14 @@ mod tests {
     use crate::config::{PolychatConfig, ProviderConfig, ServerConfig};
     use std::collections::HashMap;
 
-    fn resolve_temporary(request_temporary: bool, provider_id: &str, config: &PolychatConfig) -> bool {
-        let config_temporary = config.providers.get(provider_id)
+    fn resolve_temporary(
+        request_temporary: bool,
+        provider_id: &str,
+        config: &PolychatConfig,
+    ) -> bool {
+        let config_temporary = config
+            .providers
+            .get(provider_id)
             .map(|pc| pc.temporary)
             .unwrap_or(false);
         request_temporary || config_temporary
@@ -200,7 +219,8 @@ mod tests {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "model": "gpt-5-5-instant",
             "prompt": "hello"
-        })).expect("request should deserialize");
+        }))
+        .expect("request should deserialize");
 
         assert!(!request.temporary);
     }
@@ -211,7 +231,8 @@ mod tests {
             "model": "gpt-5-5-instant",
             "prompt": "hello",
             "temporary": true
-        })).expect("request should deserialize");
+        }))
+        .expect("request should deserialize");
 
         assert!(request.temporary);
     }

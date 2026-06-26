@@ -18,13 +18,18 @@
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, USER_AGENT};
-use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, USER_AGENT,
+};
+use serde_json::{json, Value};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
+use super::{
+    ChatChunk, ChatMessage, ChatOptions, ChunkStream, ModelInfo, Provider, ProviderConversation,
+    ProviderResponse, ToolCallStrategy,
+};
 use crate::session::load_session;
-use super::{ChatMessage, ChatOptions, ChatChunk, ModelInfo, ProviderConversation, ChunkStream, ProviderResponse, Provider, ToolCallStrategy};
 
 // ---------------------------------------------------------------------------
 // Known Gemini models
@@ -39,12 +44,25 @@ const KNOWN_GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-2.5-flash", "Gemini 2.5 Flash"),
 ];
 
+const DEFAULT_GEMINI_MODEL_HEADER: &str = "[1,null,null,null,\"56fdd199312815e2\",null,null,0,[4,5,6,8],null,null,2,null,null,1,1,\"09D681E7-26F2-4A94-A465-38386B7AB93B\"]";
+
 /// Index in inner_req_list for the temporary chat flag.
 const TEMPORARY_CHAT_FLAG_INDEX: usize = 45;
 
 /// Default metadata for a new conversation (empty strings/nulls).
 fn default_metadata() -> Value {
-    json!(["", "", "", Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, ""])
+    json!([
+        "",
+        "",
+        "",
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        ""
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +116,12 @@ fn extract_gemini_tokens(html: &str) -> (String, String, String) {
             let rest = &html[start + needle.len()..];
             if let Some(end) = rest.find('"') {
                 rest[..end].to_string()
-            } else { String::new() }
-        } else { String::new() }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
     };
 
     // Build label — appears as "cfb2h":"boq_..." or query param bl=boq_...
@@ -109,7 +131,9 @@ fn extract_gemini_tokens(html: &str) -> (String, String, String) {
             let rest = &html[start + needle.len()..];
             if let Some(end) = rest.find('"') {
                 rest[..end].to_string()
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         } else {
             // fallback: static label that generally works
             "boq_assistant-bard-web-server_20240717.22_p0".to_string()
@@ -123,8 +147,12 @@ fn extract_gemini_tokens(html: &str) -> (String, String, String) {
             let rest = &html[start + needle.len()..];
             if let Some(end) = rest.find('"') {
                 rest[..end].to_string()
-            } else { String::new() }
-        } else { String::new() }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
     };
 
     (access_token, build_label, session_id)
@@ -158,14 +186,25 @@ impl GeminiProvider {
 
         // Fetch the Gemini app page to get SNlM0e, build_label, session_id
         let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_str(&cookie_header)
-            .unwrap_or_else(|_| HeaderValue::from_static("")));
-        headers.insert(USER_AGENT, HeaderValue::from_static(
-            "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
-        ));
-        headers.insert(ACCEPT, HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&cookie_header).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+            ),
+        );
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ),
+        );
 
-        let res = self.client
+        let res = self
+            .client
             .get("https://gemini.google.com/app")
             .headers(headers)
             .timeout(std::time::Duration::from_secs(15))
@@ -184,26 +223,60 @@ impl GeminiProvider {
             bail!("Could not extract SNlM0e token from Gemini page — session may be expired");
         }
 
-        Ok(GeminiSession { cookie_header, access_token, build_label, session_id })
+        Ok(GeminiSession {
+            cookie_header,
+            access_token,
+            build_label,
+            session_id,
+        })
     }
 
-    fn build_request_headers(sess: &GeminiSession) -> HeaderMap {
+    fn model_request_header(model: &str) -> &'static str {
+        match model {
+            "gemini-3.1-pro" | "gemini-3-pro" => "[1,null,null,null,\"e6fa609c3fa255c0\",null,null,0,[4,5,6,8],null,null,2,null,null,3,1,\"09D681E7-26F2-4A94-A465-38386B7AB93B\"]",
+            "gemini-3.1-flash-lite" => "[1,null,null,null,\"8c46e95b1a07cecc\",null,null,0,[4,5,6,8],null,null,2,null,null,6,1,\"09D681E7-26F2-4A94-A465-38386B7AB93B\"]",
+            "gemini-3-flash" | "gemini-3.5-flash" => DEFAULT_GEMINI_MODEL_HEADER,
+            "gemini-2.5-pro" => "[1,null,null,null,\"2525e3954d185b3c\",null,null,null,[4]]",
+            "gemini-2.5-flash" => "[1,null,null,null,\"35609594dbe934d8\",null,null,null,[4]]",
+            _ => DEFAULT_GEMINI_MODEL_HEADER,
+        }
+    }
+
+    fn build_request_headers(sess: &GeminiSession, model: &str, request_uuid: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_str(&sess.cookie_header)
-            .unwrap_or_else(|_| HeaderValue::from_static("")));
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(
-            "application/x-www-form-urlencoded;charset=utf-8"
-        ));
-        headers.insert(ORIGIN, HeaderValue::from_static("https://gemini.google.com"));
-        headers.insert(REFERER, HeaderValue::from_static("https://gemini.google.com/"));
-        headers.insert(USER_AGENT, HeaderValue::from_static(
-            "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
-        ));
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&sess.cookie_header)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded;charset=utf-8"),
+        );
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static("https://gemini.google.com"),
+        );
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://gemini.google.com/"),
+        );
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+            ),
+        );
         headers.insert("X-Same-Domain", HeaderValue::from_static("1"));
+        headers.insert(
+            "x-goog-ext-525005358-jspb",
+            HeaderValue::from_str(request_uuid).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
         headers.insert("x-goog-ext-73010989-jspb", HeaderValue::from_static("[0]"));
-        // Default model header — uses unspecified/flash
-        headers.insert("x-goog-ext-525001261-jspb",
-            HeaderValue::from_static("[1,null,null,null,null,null,null,null,[4]]"));
+        headers.insert(
+            "x-goog-ext-525001261-jspb",
+            HeaderValue::from_static(Self::model_request_header(model)),
+        );
         headers
     }
 
@@ -214,12 +287,25 @@ impl GeminiProvider {
     /// For continuing a conversation, pass the metadata array from the previous response.
     ///
     /// `temporary` sets inner[45] = 1 to prevent the conversation from being saved.
-    fn build_f_req(prompt: &str, metadata: Option<Value>, temporary: bool) -> anyhow::Result<String> {
+    fn build_f_req(
+        prompt: &str,
+        metadata: Option<Value>,
+        temporary: bool,
+        request_uuid: &str,
+    ) -> anyhow::Result<String> {
         // inner_req_list is a 69-element array matching the gemini-webapi library format
         let mut inner: Vec<Value> = vec![Value::Null; 69];
 
         // [0]: message content = [prompt, 0, null, null, null, null, 0]
-        inner[0] = json!([prompt, 0, Value::Null, Value::Null, Value::Null, Value::Null, 0]);
+        inner[0] = json!([
+            prompt,
+            0,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            0
+        ]);
         // [1]: language
         inner[1] = json!(["en"]);
         // [2]: conversation metadata — either default (new) or from previous response (continue)
@@ -249,7 +335,7 @@ impl GeminiProvider {
         // [53]: 0
         inner[53] = json!(0);
         // [59]: UUID
-        inner[59] = json!(uuid::Uuid::new_v4().to_string().to_uppercase());
+        inner[59] = json!(request_uuid);
         // [61]: []
         inner[61] = json!([]);
         // [68]: 2
@@ -265,13 +351,15 @@ impl GeminiProvider {
     /// The conversation_id is a JSON-serialized array (e.g. `["c_abc","rid123",...,""]`).
     /// If parsing fails, returns None (will use default metadata = new conversation).
     fn parse_conversation_metadata(conversation_id: &str) -> Option<Value> {
-        serde_json::from_str::<Value>(conversation_id).ok().filter(|v| v.is_array())
+        serde_json::from_str::<Value>(conversation_id)
+            .ok()
+            .filter(|v| v.is_array())
     }
 
     /// Build the URL for a BardChatUi RPC call.
     fn build_bard_url(sess: &GeminiSession, rpc_path: &str) -> String {
         let mut url = format!(
-            "https://gemini.google.com/_/BardChatUi/data/{}?hl=en&rt=c",
+            "https://gemini.google.com/_/BardChatUi/data/{}?hl=en&pageId=none&rt=c",
             rpc_path
         );
         if !sess.build_label.is_empty() {
@@ -289,7 +377,8 @@ impl GeminiProvider {
     /// Uses rpcid "MaZiqc" (GRPC.LIST_CHATS) to fetch both pinned and unpinned chats.
     async fn list_conversations_impl(&self) -> anyhow::Result<Vec<ProviderConversation>> {
         let sess = self.get_session().await?;
-        let headers = Self::build_request_headers(&sess);
+        let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let headers = Self::build_request_headers(&sess, "gemini-3.5-flash", &request_uuid);
 
         // Fetch pinned and unpinned chats in parallel
         let (pinned_res, unpinned_res) = tokio::join!(
@@ -344,7 +433,8 @@ impl GeminiProvider {
             urlencoding::encode(&freq)
         );
 
-        let res = self.client
+        let res = self
+            .client
             .post(&url)
             .headers(headers.clone())
             .body(body_params)
@@ -425,19 +515,18 @@ fn parse_chat_list(body: &str) -> anyhow::Result<Vec<ProviderConversation>> {
                         continue;
                     }
                     // chat_data[1] = title
-                    let title = chat_arr.get(1)
+                    let title = chat_arr
+                        .get(1)
                         .and_then(|v| v.as_str())
                         .unwrap_or("Untitled")
                         .to_string();
                     // chat_data[5] = timestamp_data = [seconds, nanos]
-                    let updated_at = chat_arr.get(5)
-                        .and_then(|v| v.as_array())
-                        .and_then(|ts| {
-                            let secs = ts.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
-                            let nanos = ts.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
-                            chrono::DateTime::from_timestamp(secs, nanos as u32)
-                                .map(|dt| dt.to_rfc3339())
-                        });
+                    let updated_at = chat_arr.get(5).and_then(|v| v.as_array()).and_then(|ts| {
+                        let secs = ts.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
+                        let nanos = ts.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                        chrono::DateTime::from_timestamp(secs, nanos as u32)
+                            .map(|dt| dt.to_rfc3339())
+                    });
 
                     conversations.push(ProviderConversation {
                         id: cid,
@@ -462,9 +551,15 @@ fn parse_chat_list(body: &str) -> anyhow::Result<Vec<ProviderConversation>> {
 
 #[async_trait]
 impl Provider for GeminiProvider {
-    fn id(&self) -> &'static str { "gemini" }
-    fn name(&self) -> &'static str { "Gemini" }
-    fn tool_call_strategy(&self) -> ToolCallStrategy { ToolCallStrategy::Emulated }
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+    fn name(&self) -> &'static str {
+        "Gemini"
+    }
+    fn tool_call_strategy(&self) -> ToolCallStrategy {
+        ToolCallStrategy::Emulated
+    }
 
     async fn validate_session(&self) -> bool {
         // Check if session has valid Google cookies
@@ -472,7 +567,11 @@ impl Provider for GeminiProvider {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let cookies = session.get("cookies").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        let cookies = session
+            .get("cookies")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
         cookies.iter().any(|c| {
             let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let value = c.get("value").and_then(|v| v.as_str()).unwrap_or("");
@@ -481,9 +580,16 @@ impl Provider for GeminiProvider {
     }
 
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        Ok(KNOWN_GEMINI_MODELS.iter().map(|&(id, name)| ModelInfo {
-            id: id.into(), name: name.into(), provider: "gemini".into(), provider_model: None, capabilities: None,
-        }).collect())
+        Ok(KNOWN_GEMINI_MODELS
+            .iter()
+            .map(|&(id, name)| ModelInfo {
+                id: id.into(),
+                name: name.into(),
+                provider: "gemini".into(),
+                provider_model: None,
+                capabilities: None,
+            })
+            .collect())
     }
 
     async fn list_conversations(&self) -> anyhow::Result<Vec<ProviderConversation>> {
@@ -494,23 +600,30 @@ impl Provider for GeminiProvider {
         // Gemini does not support pre-creating conversations.
         // A real conversation ID is only available after the first message is sent.
         Ok(ProviderConversation {
-            id: String::new(), provider: "gemini".into(), title: "New conversation".into(),
-            model_id: None, updated_at: None, url: None, provider_debug: None,
+            id: String::new(),
+            provider: "gemini".into(),
+            title: "New conversation".into(),
+            model_id: None,
+            updated_at: None,
+            url: None,
+            provider_debug: None,
         })
     }
 
     async fn send_message(
         &self,
         messages: &[ChatMessage],
-        _model: &str,
+        model: &str,
         options: &ChatOptions,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<ProviderResponse> {
         let sess = self.get_session().await?;
-        let headers = Self::build_request_headers(&sess);
+        let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let headers = Self::build_request_headers(&sess, model, &request_uuid);
 
         // Build the prompt from all messages
-        let prompt = messages.iter()
+        let prompt = messages
+            .iter()
             .map(|m| format!("{}: {}", m.role.to_uppercase(), m.content))
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -518,7 +631,7 @@ impl Provider for GeminiProvider {
         // Parse conversation metadata from the conversation_id if provided
         let metadata = conversation_id.and_then(Self::parse_conversation_metadata);
 
-        let f_req = Self::build_f_req(&prompt, metadata, options.temporary)?;
+        let f_req = Self::build_f_req(&prompt, metadata, options.temporary, &request_uuid)?;
 
         // URL params
         let url = Self::build_bard_url(&sess, "assistant.lamda.BardFrontendService/StreamGenerate");
@@ -530,7 +643,8 @@ impl Provider for GeminiProvider {
             urlencoding::encode(&f_req)
         );
 
-        let res = self.client
+        let res = self
+            .client
             .post(&url)
             .headers(headers)
             .body(body_params)
@@ -541,7 +655,11 @@ impl Provider for GeminiProvider {
         if !res.status().is_success() {
             let status = res.status();
             let body_text = res.text().await.unwrap_or_default();
-            bail!("Gemini StreamGenerate failed: {} {}", status, &body_text[..body_text.len().min(200)]);
+            bail!(
+                "Gemini StreamGenerate failed: {} {}",
+                status,
+                &body_text[..body_text.len().min(200)]
+            );
         }
 
         // Capture conversation metadata from the first response chunk via oneshot channel.
@@ -558,8 +676,8 @@ impl Provider for GeminiProvider {
         // The conversation_id is the JSON-serialized metadata array.
         // If we captured it, use it. If a conversation_id was already provided, keep it.
         // Otherwise, None (the ConversationTracker won't track it).
-        let final_conversation_id = captured_metadata
-            .or_else(|| conversation_id.map(|s| s.to_string()));
+        let final_conversation_id =
+            captured_metadata.or_else(|| conversation_id.map(|s| s.to_string()));
 
         Ok(ProviderResponse {
             stream,
@@ -570,7 +688,10 @@ impl Provider for GeminiProvider {
 
 fn rand_reqid() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_micros();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_micros();
     100000 + (t as u64 % 900000)
 }
 
@@ -586,7 +707,8 @@ fn rand_reqid() -> u64 {
 fn parse_gemini_response_line(arr: &[Value]) -> (Option<String>, Option<String>) {
     // Gemini response format: outer array where arr[0][2] contains the chat response
     // Structure: [["wrb.fr", "fbmAGb", json_string, ...], ...]
-    let inner_str = match arr.get(0)
+    let inner_str = match arr
+        .get(0)
         .and_then(|a| a.as_array())
         .and_then(|a| a.get(2))
         .and_then(|v| v.as_str())
@@ -601,7 +723,8 @@ fn parse_gemini_response_line(arr: &[Value]) -> (Option<String>, Option<String>)
     };
 
     // Extract text content at inner[4][0][1][0]
-    let text = inner.get(4)
+    let text = inner
+        .get(4)
         .and_then(|v| v.as_array())
         .and_then(|a| a.get(0))
         .and_then(|v| v.as_array())
@@ -614,20 +737,19 @@ fn parse_gemini_response_line(arr: &[Value]) -> (Option<String>, Option<String>)
 
     // Extract conversation metadata at inner[1]
     // metadata[0] = cid, metadata[1] = rid, etc.
-    let metadata = inner.get(1)
-        .filter(|v| v.is_array())
-        .and_then(|v| {
-            // Only emit metadata if it contains a valid cid (starts with "c_")
-            let cid = v.as_array()
-                .and_then(|a| a.first())
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if cid.starts_with("c_") {
-                Some(serde_json::to_string(v).unwrap_or_default())
-            } else {
-                None
-            }
-        });
+    let metadata = inner.get(1).filter(|v| v.is_array()).and_then(|v| {
+        // Only emit metadata if it contains a valid cid (starts with "c_")
+        let cid = v
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if cid.starts_with("c_") {
+            Some(serde_json::to_string(v).unwrap_or_default())
+        } else {
+            None
+        }
+    });
 
     (text, metadata)
 }
@@ -637,8 +759,8 @@ fn stream_gemini_chunks(
     meta_tx: Option<oneshot::Sender<String>>,
 ) -> ChunkStream {
     use crate::providers::sse::{stream_line_response, HandlerAction};
-    use std::sync::Mutex;
     use std::cell::Cell;
+    use std::sync::Mutex;
 
     let meta_tx = Mutex::new(meta_tx);
     let sent_length = Cell::new(0usize);
@@ -696,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_build_f_req_new_conversation() {
-        let result = GeminiProvider::build_f_req("hello", None, false).unwrap();
+        let result = GeminiProvider::build_f_req("hello", None, false, "REQUEST-UUID").unwrap();
         // Should be valid JSON
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.is_array());
@@ -705,14 +827,18 @@ mod tests {
         let inner: Vec<Value> = serde_json::from_str(inner_str).unwrap();
         // inner[2] should be default metadata
         assert!(inner[2].is_array());
-        assert_eq!(inner[2].as_array().unwrap()[0], Value::String(String::new()));
+        assert_eq!(
+            inner[2].as_array().unwrap()[0],
+            Value::String(String::new())
+        );
         // inner[45] should be Null (not temporary)
         assert!(inner[TEMPORARY_CHAT_FLAG_INDEX].is_null());
+        assert_eq!(inner[59], Value::String("REQUEST-UUID".into()));
     }
 
     #[test]
     fn test_build_f_req_temporary() {
-        let result = GeminiProvider::build_f_req("hello", None, true).unwrap();
+        let result = GeminiProvider::build_f_req("hello", None, true, "REQUEST-UUID").unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let inner_str = parsed.as_array().unwrap()[1].as_str().unwrap();
         let inner: Vec<Value> = serde_json::from_str(inner_str).unwrap();
@@ -722,8 +848,21 @@ mod tests {
 
     #[test]
     fn test_build_f_req_with_metadata() {
-        let metadata = json!(["c_abc123", "rid456", "rcid789", Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, ""]);
-        let result = GeminiProvider::build_f_req("hello", Some(metadata.clone()), false).unwrap();
+        let metadata = json!([
+            "c_abc123",
+            "rid456",
+            "rcid789",
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            ""
+        ]);
+        let result =
+            GeminiProvider::build_f_req("hello", Some(metadata.clone()), false, "REQUEST-UUID")
+                .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         let inner_str = parsed.as_array().unwrap()[1].as_str().unwrap();
         let inner: Vec<Value> = serde_json::from_str(inner_str).unwrap();
@@ -732,8 +871,53 @@ mod tests {
     }
 
     #[test]
+    fn test_model_request_header_uses_selected_model() {
+        assert_eq!(
+            GeminiProvider::model_request_header("gemini-3.1-pro"),
+            "[1,null,null,null,\"e6fa609c3fa255c0\",null,null,0,[4,5,6,8],null,null,2,null,null,3,1,\"09D681E7-26F2-4A94-A465-38386B7AB93B\"]"
+        );
+        assert_eq!(
+            GeminiProvider::model_request_header("gemini-2.5-flash"),
+            "[1,null,null,null,\"35609594dbe934d8\",null,null,null,[4]]"
+        );
+        assert_eq!(
+            GeminiProvider::model_request_header("gemini-3-flash"),
+            DEFAULT_GEMINI_MODEL_HEADER
+        );
+    }
+
+    #[test]
+    fn test_build_bard_url_includes_page_id() {
+        let sess = GeminiSession {
+            cookie_header: "SID=abc".into(),
+            access_token: "token".into(),
+            build_label: "boq_label".into(),
+            session_id: "sid123".into(),
+        };
+        let url = GeminiProvider::build_bard_url(
+            &sess,
+            "assistant.lamda.BardFrontendService/StreamGenerate",
+        );
+        assert!(url.contains("pageId=none"));
+        assert!(url.contains("hl=en"));
+        assert!(url.contains("bl=boq_label"));
+        assert!(url.contains("f.sid=sid123"));
+    }
+
+    #[test]
     fn test_parse_conversation_metadata_valid() {
-        let meta = json!(["c_abc123", "rid456", "rcid789", Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, ""]);
+        let meta = json!([
+            "c_abc123",
+            "rid456",
+            "rcid789",
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            ""
+        ]);
         let meta_str = serde_json::to_string(&meta).unwrap();
         let parsed = GeminiProvider::parse_conversation_metadata(&meta_str);
         assert!(parsed.is_some());
@@ -751,11 +935,22 @@ mod tests {
     fn test_parse_gemini_response_line_with_metadata() {
         // Simulate a Gemini response with both text content and metadata
         let inner = json!([
-            Value::Null,                                    // [0]
-            ["c_test123", "rid456", "rcid789", Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, Value::Null, ""], // [1] metadata
-            Value::Null,                                    // [2]
-            Value::Null,                                    // [3]
-            [["type", ["Hello world"]]],                    // [4] text content
+            Value::Null, // [0]
+            [
+                "c_test123",
+                "rid456",
+                "rcid789",
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                ""
+            ], // [1] metadata
+            Value::Null, // [2]
+            Value::Null, // [3]
+            [["type", ["Hello world"]]], // [4] text content
         ]);
         let inner_str = serde_json::to_string(&inner).unwrap();
 
@@ -765,7 +960,10 @@ mod tests {
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(metadata.is_some());
         let meta_parsed: Value = serde_json::from_str(&metadata.unwrap()).unwrap();
-        assert_eq!(meta_parsed.as_array().unwrap()[0], Value::String("c_test123".to_string()));
+        assert_eq!(
+            meta_parsed.as_array().unwrap()[0],
+            Value::String("c_test123".to_string())
+        );
     }
 
     #[test]
@@ -773,7 +971,7 @@ mod tests {
         // Metadata without a valid cid (doesn't start with "c_") should not be emitted
         let inner = json!([
             Value::Null,
-            ["not_a_cid", "rid456"],  // [1] metadata with invalid cid
+            ["not_a_cid", "rid456"], // [1] metadata with invalid cid
             Value::Null,
             Value::Null,
             [["type", ["Hello"]]],
@@ -793,7 +991,7 @@ mod tests {
             ["c_test123", "rid456"],
             Value::Null,
             Value::Null,
-            [["type", [""]]],  // empty text
+            [["type", [""]]], // empty text
         ]);
         let inner_str = serde_json::to_string(&inner).unwrap();
         let arr = json!([["wrb.fr", "fbmAGb", inner_str, Value::Null, "generic"]]);
@@ -817,12 +1015,33 @@ mod tests {
             Value::Null,
             Value::Null,
             [
-                ["c_abc123", "My First Chat", 1, Value::Null, Value::Null, [1716200000, 0]],
-                ["c_def456", "My Second Chat", 0, Value::Null, Value::Null, [1716300000, 500000000]],
+                [
+                    "c_abc123",
+                    "My First Chat",
+                    1,
+                    Value::Null,
+                    Value::Null,
+                    [1716200000, 0]
+                ],
+                [
+                    "c_def456",
+                    "My Second Chat",
+                    0,
+                    Value::Null,
+                    Value::Null,
+                    [1716300000, 500000000]
+                ],
             ]
         ]);
         let part_body_str = serde_json::to_string(&part_body).unwrap();
-        let line = serde_json::to_string(&json!([["wrb.fr", "MaZiqc", part_body_str, Value::Null, "generic"]])).unwrap();
+        let line = serde_json::to_string(&json!([[
+            "wrb.fr",
+            "MaZiqc",
+            part_body_str,
+            Value::Null,
+            "generic"
+        ]]))
+        .unwrap();
         let body = format!(")]}}'\n\n{}\n", line);
 
         let result = parse_chat_list(&body).unwrap();
@@ -837,9 +1056,27 @@ mod tests {
     #[test]
     fn test_parse_chat_list_deduplication() {
         // Same cid appearing in both pinned and unpinned responses
-        let part_body = json!([Value::Null, Value::Null, [["c_dup", "Dup Chat", 1, Value::Null, Value::Null, [1716200000, 0]]]]);
+        let part_body = json!([
+            Value::Null,
+            Value::Null,
+            [[
+                "c_dup",
+                "Dup Chat",
+                1,
+                Value::Null,
+                Value::Null,
+                [1716200000, 0]
+            ]]
+        ]);
         let part_body_str = serde_json::to_string(&part_body).unwrap();
-        let line = serde_json::to_string(&json!([["wrb.fr", "MaZiqc", part_body_str, Value::Null, "generic"]])).unwrap();
+        let line = serde_json::to_string(&json!([[
+            "wrb.fr",
+            "MaZiqc",
+            part_body_str,
+            Value::Null,
+            "generic"
+        ]]))
+        .unwrap();
         let body = format!(")]}}'\n\n{}\n{}\n", line, line);
 
         let result = parse_chat_list(&body).unwrap();
@@ -850,9 +1087,20 @@ mod tests {
     #[test]
     fn test_parse_chat_list_empty_cid() {
         // Chat with empty cid should be skipped
-        let part_body = json!([Value::Null, Value::Null, [["", "No CID", 0, Value::Null, Value::Null, [1716200000, 0]]]]);
+        let part_body = json!([
+            Value::Null,
+            Value::Null,
+            [["", "No CID", 0, Value::Null, Value::Null, [1716200000, 0]]]
+        ]);
         let part_body_str = serde_json::to_string(&part_body).unwrap();
-        let line = serde_json::to_string(&json!([["wrb.fr", "MaZiqc", part_body_str, Value::Null, "generic"]])).unwrap();
+        let line = serde_json::to_string(&json!([[
+            "wrb.fr",
+            "MaZiqc",
+            part_body_str,
+            Value::Null,
+            "generic"
+        ]]))
+        .unwrap();
         let body = format!(")]}}'\n\n{}\n", line);
 
         let result = parse_chat_list(&body).unwrap();
@@ -864,7 +1112,14 @@ mod tests {
         // Chat without timestamp data
         let part_body = json!([Value::Null, Value::Null, [["c_notime", "No Time Chat", 0]]]);
         let part_body_str = serde_json::to_string(&part_body).unwrap();
-        let line = serde_json::to_string(&json!([["wrb.fr", "MaZiqc", part_body_str, Value::Null, "generic"]])).unwrap();
+        let line = serde_json::to_string(&json!([[
+            "wrb.fr",
+            "MaZiqc",
+            part_body_str,
+            Value::Null,
+            "generic"
+        ]]))
+        .unwrap();
         let body = format!(")]}}'\n\n{}\n", line);
 
         let result = parse_chat_list(&body).unwrap();

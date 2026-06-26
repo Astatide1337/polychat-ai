@@ -4,6 +4,10 @@
   "description": "Self-hosted browser-backed AI CLI and local OpenAI-compatible API server.",
   "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "bin": {
     "polychat": "dist/index.js"
   },
@@ -41,11 +45,17 @@
     "build": "tsup",
     "build:web": "vite build --config web/vite.config.ts",
     "build:server": "cargo build --release --manifest-path rust/Cargo.toml",
+    "build:history": "npm --workspace packages/history-core run build",
+    "build:mcp": "npm --workspace apps/mcp run build",
+    "build:extension": "npm --workspace apps/extension run build",
     "dev": "tsup --watch",
     "dev:web": "vite --config web/vite.config.ts",
+    "dev:mcp": "npm --workspace apps/mcp run dev",
+    "dev:extension": "npm --workspace apps/extension run dev",
     "start": "node dist/index.js",
     "test": "node --test test/**/*.test.mjs",
     "test:web": "vitest run --config web/vitest.config.ts",
+    "test:history": "npm --workspace packages/history-core run test",
     "test:e2e": "playwright test",
     "test:live:web": "node scripts/live-webui-e2e.mjs",
     "conformance:report": "node scripts/conformance-report.mjs",
@@ -69,7 +79,7 @@
     "ora": "^9.4.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.7",
-    "ws": "^8.0.0"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.0",

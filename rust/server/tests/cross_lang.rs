@@ -1,7 +1,7 @@
 use aes::cipher::consts::U16;
+use aes::Aes256;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{AesGcm, Nonce};
-use aes::Aes256;
 use base64::Engine;
 
 type Aes256GcmN16 = AesGcm<Aes256, U16>;
@@ -11,8 +11,11 @@ fn main() {
     let key = hex::decode(key_hex).unwrap();
     let key: [u8; 32] = key.try_into().unwrap();
 
-    let wire_b64 = "DXU3W/QWJCkqCXB+wHQ+ziwfsJGDs+fNCAnQ4fM7YOdi48MffBVmZ+9hrBbTIQAcMpi2ijHdbVVnLX5uqQ==";
-    let wire = base64::engine::general_purpose::STANDARD.decode(wire_b64).unwrap();
+    let wire_b64 =
+        "DXU3W/QWJCkqCXB+wHQ+ziwfsJGDs+fNCAnQ4fM7YOdi48MffBVmZ+9hrBbTIQAcMpi2ijHdbVVnLX5uqQ==";
+    let wire = base64::engine::general_purpose::STANDARD
+        .decode(wire_b64)
+        .unwrap();
 
     let (nonce_bytes, rest) = wire.split_at(16);
     let (tag_bytes, ciphertext) = rest.split_at(16);

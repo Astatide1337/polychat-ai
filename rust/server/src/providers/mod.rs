@@ -20,8 +20,6 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
-
-
     pub reasoning_effort: Option<String>,
     pub stream: bool,
     pub stop: Vec<String>,
@@ -99,7 +97,7 @@ pub struct ProviderResponse {
     /// `None` means the provider did not expose the ID (e.g. Gemini).
     pub conversation_id: Option<String>,
 }
- 
+
 // ---------------------------------------------------------------------------
 // Shared ReceiverStream helper
 // ---------------------------------------------------------------------------
@@ -117,15 +115,20 @@ impl<T> ReceiverStream<T> {
 
 impl<T> futures::Stream for ReceiverStream<T> {
     type Item = T;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
-
 /// Merge `Set-Cookie` header values into an existing cookie string.
 /// Existing cookies with the same name are overwritten; insertion order is preserved.
-pub fn merge_set_cookies(existing: &str, set_cookie_values: impl Iterator<Item = String>) -> String {
+pub fn merge_set_cookies(
+    existing: &str,
+    set_cookie_values: impl Iterator<Item = String>,
+) -> String {
     // (name, value) pairs preserving order; later entries override earlier ones for same name
     let mut pairs: Vec<(String, String)> = existing
         .split("; ")
@@ -173,8 +176,9 @@ pub fn collect_set_cookies(res: &reqwest::Response) -> Vec<String> {
 
 #[async_trait]
 pub trait Provider: Send + Sync + 'static {
- #[allow(dead_code)]
-    #[allow(dead_code)] fn id(&self) -> &'static str;
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
 
     /// Check if the session is valid by making a lightweight API call.
@@ -190,7 +194,9 @@ pub trait Provider: Send + Sync + 'static {
     async fn create_conversation(&self, model: &str) -> anyhow::Result<ProviderConversation>;
 
     /// How this provider handles tool calling.
-    fn tool_call_strategy(&self) -> ToolCallStrategy { ToolCallStrategy::PromptInjected }
+    fn tool_call_strategy(&self) -> ToolCallStrategy {
+        ToolCallStrategy::PromptInjected
+    }
 
     /// Send a message (creates a new conversation internally if no conversation_id given).
     /// Returns a `ProviderResponse` containing the content stream and the actual
@@ -203,9 +209,9 @@ pub trait Provider: Send + Sync + 'static {
         conversation_id: Option<&str>,
     ) -> anyhow::Result<ProviderResponse>;
 }
-pub mod sse;
-pub mod deepseek;
-pub mod claude;
 pub mod chatgpt;
+pub mod claude;
+pub mod deepseek;
 pub mod gemini;
 pub mod kimi;
+pub mod sse;

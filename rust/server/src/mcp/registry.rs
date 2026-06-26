@@ -2,7 +2,7 @@ use crate::mcp::types::{
     McpApprovalMode, McpHostConfig, McpServerStatus, McpToolDescriptor, McpToolRegistryEntry,
     McpTransportConfig, OpenAiToolDefinition, OpenAiToolFunction,
 };
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default)]
@@ -230,16 +230,14 @@ mod tests {
                 descriptor("create-file"),
             ))
             .unwrap();
-        assert!(
-            registry
-                .insert(registry_entry(
-                    "create_file".to_string(),
-                    "b",
-                    McpApprovalMode::Ask,
-                    descriptor("create_file"),
-                ))
-                .is_err()
-        );
+        assert!(registry
+            .insert(registry_entry(
+                "create_file".to_string(),
+                "b",
+                McpApprovalMode::Ask,
+                descriptor("create_file"),
+            ))
+            .is_err());
     }
 
     #[tokio::test]

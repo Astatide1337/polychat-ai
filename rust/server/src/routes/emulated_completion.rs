@@ -1,48 +1,41 @@
-use std::sync::Arc;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::Json;
-use serde_json::Value;
 use crate::providers::{ChatMessage, ChatOptions, Provider};
 use crate::routes::completion_messages::CompletionRequest;
 use crate::routes::conversation_tracker::TRACKER;
 use crate::routes::errors::RouteError;
 use crate::routes::openai_format::{
-    emulated_stream_text_response,
-    emulated_stream_tool_call_response,
-    event_stream_response,
-    format_sse_chunk,
-    text_completion_response,
-    tool_call_completion_response,
-    StreamDelta,
+    emulated_stream_text_response, emulated_stream_tool_call_response, event_stream_response,
+    format_sse_chunk, text_completion_response, tool_call_completion_response, StreamDelta,
 };
 use crate::tools::emulated::{
-    EmulatedToolResult,
-    build_emulated_tool_prompt,
-    build_repair_prompt_with_context,
-    parse_emulated_tool_response,
-    validate_emulated_tool_call,
+    build_emulated_tool_prompt, build_repair_prompt_with_context, parse_emulated_tool_response,
+    validate_emulated_tool_call, EmulatedToolResult,
 };
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::Json;
+use serde_json::Value;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Validator — validation heuristics for emulated completion responses
 // ---------------------------------------------------------------------------
 
 mod validator {
+    use crate::routes::completion_messages::{latest_user_text, CompletionMessage};
     use serde_json::Value;
-    use crate::routes::completion_messages::{CompletionMessage, latest_user_text};
-    
 
     /// Whether a failed emulated response should be retried.
     pub fn should_retry_emulated_response(tool_choice: Option<&Value>, err: &str) -> bool {
         match tool_choice {
             Some(Value::String(choice)) if choice == "required" => true,
             Some(Value::Object(_)) => true,
-            _ => err.contains("incorrectly denied having tool access")
-                || err.contains("explicitly requested the `")
-                || err.contains("attempted to show tool-call JSON inline")
-                || err.contains("returned a structured JSON payload")
-                || err.contains("claimed it already changed files"),
+            _ => {
+                err.contains("incorrectly denied having tool access")
+                    || err.contains("explicitly requested the `")
+                    || err.contains("attempted to show tool-call JSON inline")
+                    || err.contains("returned a structured JSON payload")
+                    || err.contains("claimed it already changed files")
+            }
         }
     }
 
@@ -79,7 +72,9 @@ mod validator {
     pub fn has_tool_result_after_latest_user(messages: &[CompletionMessage]) -> bool {
         let last_user_idx = messages.iter().rposition(|msg| msg.role == "user");
         let search_start = last_user_idx.map_or(0, |idx| idx + 1);
-        messages[search_start..].iter().any(|msg| msg.role == "tool")
+        messages[search_start..]
+            .iter()
+            .any(|msg| msg.role == "tool")
     }
 
     /// Whether the content claims to have performed an external action
@@ -106,7 +101,9 @@ mod validator {
             "created at /",
             "ready for: /go ",
         ];
-        action_markers.iter().any(|marker| content_lower.contains(marker))
+        action_markers
+            .iter()
+            .any(|marker| content_lower.contains(marker))
     }
 
     /// Whether the content contains inline tool-call JSON that should have
@@ -331,47 +328,47 @@ mod validator {
         tool_choice: Option<&Value>,
     ) -> Result<String, String> {
         if !name.is_empty() {
-        // Check if the name matches an available tool directly
-        let available: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| {
-                t.get("function")
-                    .and_then(|v| v.get("name"))
-                    .and_then(|v| v.as_str())
-            })
-            .collect();
+            // Check if the name matches an available tool directly
+            let available: Vec<&str> = tools
+                .iter()
+                .filter_map(|t| {
+                    t.get("function")
+                        .and_then(|v| v.get("name"))
+                        .and_then(|v| v.as_str())
+                })
+                .collect();
 
-        if available.contains(&name) {
+            if available.contains(&name) {
+                return Ok(name.to_string());
+            }
+
+            // Known tool-name aliases that models commonly hallucinate
+            let resolved = match name {
+                "python" | "execute" | "shell" | "run" | "terminal" => {
+                    // Models often call a code-execution tool instead of bash
+                    if available.contains(&"bash") {
+                        Some("bash".to_string())
+                    } else {
+                        None
+                    }
+                }
+                "cat" | "file" | "head" | "open" => {
+                    // Models sometimes use file-reading aliases instead of read
+                    if available.contains(&"read") {
+                        Some("read".to_string())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(resolved) = resolved {
+                return Ok(resolved);
+            }
+
             return Ok(name.to_string());
         }
-
-        // Known tool-name aliases that models commonly hallucinate
-        let resolved = match name {
-            "python" | "execute" | "shell" | "run" | "terminal" => {
-                // Models often call a code-execution tool instead of bash
-                if available.contains(&"bash") {
-                    Some("bash".to_string())
-                } else {
-                    None
-                }
-            }
-            "cat" | "file" | "head" | "open" => {
-                // Models sometimes use file-reading aliases instead of read
-                if available.contains(&"read") {
-                    Some("read".to_string())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        if let Some(resolved) = resolved {
-            return Ok(resolved);
-        }
-
-        return Ok(name.to_string());
-    }
         if let Some(Value::Object(obj)) = tool_choice {
             if let Some(name) = obj
                 .get("function")
@@ -414,11 +411,8 @@ mod validator {
 
 // Re-export validator functions used by the main module
 use validator::{
-    final_answer_requires_tool_retry,
-    looks_like_structured_payload,
-    resolve_emulated_tool_name,
-    should_accept_plain_text_final,
-    should_retry_emulated_response,
+    final_answer_requires_tool_retry, looks_like_structured_payload, resolve_emulated_tool_name,
+    should_accept_plain_text_final, should_retry_emulated_response,
     should_stream_emulated_incrementally,
 };
 
@@ -429,9 +423,9 @@ use validator::{
 mod sink {
     use crate::providers::{ChatChunk, ChunkStream};
     use crate::routes::openai_format::{format_sse_chunk, StreamDelta};
-    use tokio::sync::mpsc;
-    use futures::StreamExt;
     use crate::tools::emulated::StreamingEmulatedParser;
+    use futures::StreamExt;
+    use tokio::sync::mpsc;
 
     /// A sink that absorbs emulated completion output.
     /// The non-streaming path collects everything; the streaming path
@@ -739,7 +733,8 @@ async fn run_emulated_completion_loop<S: EmulatedSink>(
         match parse_emulated_tool_response(&raw_output) {
             Ok(EmulatedToolResult::Final(content)) => {
                 if let Some(err) = final_answer_requires_tool_retry(body, &tools, &content) {
-                    if sink.can_retry() && attempt < 2
+                    if sink.can_retry()
+                        && attempt < 2
                         && should_retry_emulated_response(body.tool_choice.as_ref(), &err)
                     {
                         append_repair_turn(
@@ -767,38 +762,38 @@ async fn run_emulated_completion_loop<S: EmulatedSink>(
                 });
             }
             Ok(EmulatedToolResult::ToolCall { name, arguments }) => {
-                let resolved_name =
-                    match resolve_emulated_tool_name(&name, &tools, body.tool_choice.as_ref()) {
-                        Ok(name) => name,
-                        Err(err)
-                            if sink.can_retry()
-                                && attempt < 2
-                                && should_retry_emulated_response(
-                                    body.tool_choice.as_ref(),
-                                    &err,
-                                ) =>
-                        {
-                            append_repair_turn(
-                                &mut working_messages,
-                                raw_output,
-                                &err,
-                                &tools,
-                                body.tool_choice.as_ref(),
-                            );
-                            continue;
-                        }
-                        Err(err) => {
-                            return Err(RouteError {
-                                status: StatusCode::BAD_GATEWAY,
-                                message: format!(
-                                    "{} emulated tool call name resolution failed after retries: {}",
-                                    provider_id, err
-                                ),
-                                err_type: "upstream_error",
-                                code: "tool_call_invalid",
-                            });
-                        }
-                    };
+                let resolved_name = match resolve_emulated_tool_name(
+                    &name,
+                    &tools,
+                    body.tool_choice.as_ref(),
+                ) {
+                    Ok(name) => name,
+                    Err(err)
+                        if sink.can_retry()
+                            && attempt < 2
+                            && should_retry_emulated_response(body.tool_choice.as_ref(), &err) =>
+                    {
+                        append_repair_turn(
+                            &mut working_messages,
+                            raw_output,
+                            &err,
+                            &tools,
+                            body.tool_choice.as_ref(),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(RouteError {
+                            status: StatusCode::BAD_GATEWAY,
+                            message: format!(
+                                "{} emulated tool call name resolution failed after retries: {}",
+                                provider_id, err
+                            ),
+                            err_type: "upstream_error",
+                            code: "tool_call_invalid",
+                        });
+                    }
+                };
 
                 match validate_emulated_tool_call(
                     &resolved_name,
@@ -842,10 +837,7 @@ async fn run_emulated_completion_loop<S: EmulatedSink>(
                     Err(err)
                         if sink.can_retry()
                             && attempt < 2
-                            && should_retry_emulated_response(
-                                body.tool_choice.as_ref(),
-                                &err,
-                            ) =>
+                            && should_retry_emulated_response(body.tool_choice.as_ref(), &err) =>
                     {
                         append_repair_turn(
                             &mut working_messages,
@@ -879,14 +871,9 @@ async fn run_emulated_completion_loop<S: EmulatedSink>(
                     ) =>
             {
                 let content = raw_output.trim().to_string();
-                if let Some(retry_err) =
-                    final_answer_requires_tool_retry(body, &tools, &content)
-                {
+                if let Some(retry_err) = final_answer_requires_tool_retry(body, &tools, &content) {
                     if attempt < 2
-                        && should_retry_emulated_response(
-                            body.tool_choice.as_ref(),
-                            &retry_err,
-                        )
+                        && should_retry_emulated_response(body.tool_choice.as_ref(), &retry_err)
                     {
                         append_repair_turn(
                             &mut working_messages,
@@ -1032,8 +1019,13 @@ pub async fn emulated_completion_response(
                 emulated_stream_tool_call_response(request_id, &body.model, &name, &arguments)
                     .into_response()
             } else {
-                Json(tool_call_completion_response(request_id, &body.model, name, arguments))
-                    .into_response()
+                Json(tool_call_completion_response(
+                    request_id,
+                    &body.model,
+                    name,
+                    arguments,
+                ))
+                .into_response()
             }
         }
         Err(err) => err.into_response(),
@@ -1126,15 +1118,17 @@ fn stream_emulated_completion_response(
                         &request_id,
                         &model,
                         StreamDelta {
-                            tool_calls: Some(vec![crate::routes::openai_format::StreamToolCallDelta {
-                                index: 0,
-                                id: Some(call_id),
-                                kind: Some("function"),
-                                function: crate::routes::openai_format::StreamFunctionDelta {
-                                    name: Some(name),
-                                    arguments: Some(String::new()),
+                            tool_calls: Some(vec![
+                                crate::routes::openai_format::StreamToolCallDelta {
+                                    index: 0,
+                                    id: Some(call_id),
+                                    kind: Some("function"),
+                                    function: crate::routes::openai_format::StreamFunctionDelta {
+                                        name: Some(name),
+                                        arguments: Some(String::new()),
+                                    },
                                 },
-                            }]),
+                            ]),
                             ..Default::default()
                         },
                         None,
@@ -1146,15 +1140,20 @@ fn stream_emulated_completion_response(
                             &request_id,
                             &model,
                             StreamDelta {
-                                tool_calls: Some(vec![crate::routes::openai_format::StreamToolCallDelta {
-                                    index: 0,
-                                    id: None,
-                                    kind: None,
-                                    function: crate::routes::openai_format::StreamFunctionDelta {
-                                        name: None,
-                                        arguments: Some(String::from_utf8_lossy(chunk).to_string()),
+                                tool_calls: Some(vec![
+                                    crate::routes::openai_format::StreamToolCallDelta {
+                                        index: 0,
+                                        id: None,
+                                        kind: None,
+                                        function:
+                                            crate::routes::openai_format::StreamFunctionDelta {
+                                                name: None,
+                                                arguments: Some(
+                                                    String::from_utf8_lossy(chunk).to_string(),
+                                                ),
+                                            },
                                     },
-                                }]),
+                                ]),
                                 ..Default::default()
                             },
                             None,
@@ -1172,7 +1171,11 @@ fn stream_emulated_completion_response(
                 let _ = tx.send(Ok("data: [DONE]\n\n".into())).await;
             }
             Err(err) => {
-                tracing::warn!("{} streamed emulated completion failed: {}", provider_id, err.message);
+                tracing::warn!(
+                    "{} streamed emulated completion failed: {}",
+                    provider_id,
+                    err.message
+                );
                 let _ = tx
                     .send(Ok(format_sse_chunk(
                         &request_id,
@@ -1195,33 +1198,23 @@ fn stream_emulated_completion_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        duplicate_tool_call_error,
-        format_tool_result_message,
-        inject_emulated_tool_prompt,
-        is_exact_consecutive_duplicate_tool_call,
-        latest_completed_tool_call,
-        next_emulated_conversation_id,
-        normalize_tool_arguments,
-        should_store_emulated_tracker,
-        should_stream_emulated_incrementally,
-    };
     use super::validator::{
-        final_answer_claims_external_action,
-        final_answer_contains_inline_tool_call_json,
-        final_answer_requests_user_supplied_local_inputs,
-        final_answer_requires_tool_retry,
-        final_answer_seeks_permission_for_safe_tool_use,
-        has_tool_result_after_latest_user,
-        looks_like_structured_payload,
-        resolve_emulated_tool_name,
-        should_accept_plain_text_final,
+        final_answer_claims_external_action, final_answer_contains_inline_tool_call_json,
+        final_answer_requests_user_supplied_local_inputs, final_answer_requires_tool_retry,
+        final_answer_seeks_permission_for_safe_tool_use, has_tool_result_after_latest_user,
+        looks_like_structured_payload, resolve_emulated_tool_name, should_accept_plain_text_final,
         should_retry_emulated_response,
     };
-    use crate::tools::emulated::validate_emulated_tool_call;
+    use super::{
+        duplicate_tool_call_error, format_tool_result_message, inject_emulated_tool_prompt,
+        is_exact_consecutive_duplicate_tool_call, latest_completed_tool_call,
+        next_emulated_conversation_id, normalize_tool_arguments, should_store_emulated_tracker,
+        should_stream_emulated_incrementally,
+    };
     use crate::providers::ChatMessage;
     use crate::routes::completion_messages::{CompletionMessage, CompletionRequest};
-    use serde_json::{Value, json};
+    use crate::tools::emulated::validate_emulated_tool_call;
+    use serde_json::{json, Value};
 
     fn request_with_user_text(text: &str, tool_choice: Option<Value>) -> CompletionRequest {
         CompletionRequest {
@@ -1261,9 +1254,13 @@ mod tests {
 
     #[test]
     fn final_answer_retry_triggers_for_required_tool_choice() {
-        let request = request_with_user_text("list the files", Some(Value::String("required".into())));
+        let request =
+            request_with_user_text("list the files", Some(Value::String("required".into())));
         let err = final_answer_requires_tool_retry(&request, &[], "Here are some files.");
-        assert_eq!(err.as_deref(), Some("tool choice was `required`, but the model answered directly"));
+        assert_eq!(
+            err.as_deref(),
+            Some("tool choice was `required`, but the model answered directly")
+        );
     }
 
     #[test]
@@ -1278,21 +1275,15 @@ mod tests {
 
     #[test]
     fn temporary_emulated_requests_do_not_reuse_provider_conversation_ids() {
-        let next = next_emulated_conversation_id(
-            true,
-            Some("existing".into()),
-            Some("returned".into()),
-        );
+        let next =
+            next_emulated_conversation_id(true, Some("existing".into()), Some("returned".into()));
         assert!(next.is_none());
     }
 
     #[test]
     fn persistent_emulated_requests_keep_latest_provider_conversation_id() {
-        let next = next_emulated_conversation_id(
-            false,
-            Some("existing".into()),
-            Some("returned".into()),
-        );
+        let next =
+            next_emulated_conversation_id(false, Some("existing".into()), Some("returned".into()));
         assert_eq!(next.as_deref(), Some("returned"));
     }
 
@@ -1354,8 +1345,11 @@ mod tests {
     fn final_answer_retry_triggers_for_explicit_tool_request() {
         let request = request_with_user_text("use bash to print the current directory", None);
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
-        let err = final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
-        assert!(err.unwrap().contains("explicitly requested the `bash` tool"));
+        let err =
+            final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
+        assert!(err
+            .unwrap()
+            .contains("explicitly requested the `bash` tool"));
     }
 
     #[test]
@@ -1369,10 +1363,8 @@ mod tests {
 
     #[test]
     fn final_answer_retry_triggers_for_permission_seeking_with_safe_tool() {
-        let request = request_with_user_text(
-            "Inspect this repo and tell me the package name.",
-            None,
-        );
+        let request =
+            request_with_user_text("Inspect this repo and tell me the package name.", None);
         let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
         let err = final_answer_requires_tool_retry(
             &request,
@@ -1421,10 +1413,8 @@ mod tests {
 
     #[test]
     fn final_answer_retry_triggers_for_permission_denial_wording() {
-        let request = request_with_user_text(
-            "Inspect this repo and tell me the package name.",
-            None,
-        );
+        let request =
+            request_with_user_text("Inspect this repo and tell me the package name.", None);
         let tools = vec![json!({ "type": "function", "function": { "name": "read" } })];
         let err = final_answer_requires_tool_retry(
             &request,
@@ -1456,7 +1446,8 @@ mod tests {
             tool_calls: None,
         });
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
-        let err = final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
+        let err =
+            final_answer_requires_tool_retry(&request, &tools, "The current directory is /tmp.");
         assert!(err.is_none());
     }
 
@@ -1488,7 +1479,8 @@ mod tests {
 
     #[test]
     fn incremental_streaming_is_disabled_for_explicit_tool_request() {
-        let request = request_with_user_text("Use the bash tool to print the current directory.", None);
+        let request =
+            request_with_user_text("Use the bash tool to print the current directory.", None);
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
         assert!(!should_stream_emulated_incrementally(&request, &tools));
     }
@@ -1529,7 +1521,8 @@ mod tests {
 
     #[test]
     fn structured_json_payload_is_not_accepted_as_plain_text_final() {
-        let payload = "{\"name\":\"0001-generate-readme\",\"type\":\"document\",\"content\":\"hello\"}";
+        let payload =
+            "{\"name\":\"0001-generate-readme\",\"type\":\"document\",\"content\":\"hello\"}";
         assert!(looks_like_structured_payload(payload));
         assert!(!should_accept_plain_text_final(
             None,
@@ -1567,9 +1560,9 @@ mod tests {
             &[],
             "Spec written to ~/.pi/grill/cli-readme-generator/0001-generate-readme.md",
         );
-        assert!(err
-            .unwrap()
-            .contains("claimed it already changed files, ran commands, or completed another external action"));
+        assert!(err.unwrap().contains(
+            "claimed it already changed files, ran commands, or completed another external action"
+        ));
     }
 
     #[test]
@@ -1597,14 +1590,18 @@ mod tests {
         let mut request = request_with_user_text("Write the final spec", None);
         request.messages.push(CompletionMessage {
             role: "assistant".into(),
-            content: Some(Value::String("Tool call call_1: write({\"path\":\"/tmp/spec.md\"})".into())),
+            content: Some(Value::String(
+                "Tool call call_1: write({\"path\":\"/tmp/spec.md\"})".into(),
+            )),
             tool_call_id: None,
             name: None,
             tool_calls: None,
         });
         request.messages.push(CompletionMessage {
             role: "tool".into(),
-            content: Some(Value::String("Successfully wrote 123 bytes to /tmp/spec.md".into())),
+            content: Some(Value::String(
+                "Successfully wrote 123 bytes to /tmp/spec.md".into(),
+            )),
             tool_call_id: Some("call_1".into()),
             name: None,
             tool_calls: None,
@@ -1633,13 +1630,16 @@ mod tests {
     #[test]
     fn ignores_tool_result_before_latest_user() {
         let mut request = request_with_user_text("Write the final spec", None);
-        request.messages.insert(0, CompletionMessage {
-            role: "tool".into(),
-            content: Some(Value::String("older tool result".into())),
-            tool_call_id: Some("call_0".into()),
-            name: None,
-            tool_calls: None,
-        });
+        request.messages.insert(
+            0,
+            CompletionMessage {
+                role: "tool".into(),
+                content: Some(Value::String("older tool result".into())),
+                tool_call_id: Some("call_0".into()),
+                name: None,
+                tool_calls: None,
+            },
+        );
         assert!(!has_tool_result_after_latest_user(&request.messages));
     }
 
@@ -1689,7 +1689,10 @@ mod tests {
     #[test]
     fn resolve_tool_name_uses_single_available_tool() {
         let tools = vec![json!({ "type": "function", "function": { "name": "bash" } })];
-        assert_eq!(resolve_emulated_tool_name("", &tools, None).unwrap(), "bash");
+        assert_eq!(
+            resolve_emulated_tool_name("", &tools, None).unwrap(),
+            "bash"
+        );
     }
 
     #[test]
@@ -1709,9 +1712,18 @@ mod tests {
             json!({ "type": "function", "function": { "name": "bash" } }),
             json!({ "type": "function", "function": { "name": "read" } }),
         ];
-        assert_eq!(resolve_emulated_tool_name("python", &tools, None).unwrap(), "bash");
-        assert_eq!(resolve_emulated_tool_name("shell", &tools, None).unwrap(), "bash");
-        assert_eq!(resolve_emulated_tool_name("execute", &tools, None).unwrap(), "bash");
+        assert_eq!(
+            resolve_emulated_tool_name("python", &tools, None).unwrap(),
+            "bash"
+        );
+        assert_eq!(
+            resolve_emulated_tool_name("shell", &tools, None).unwrap(),
+            "bash"
+        );
+        assert_eq!(
+            resolve_emulated_tool_name("execute", &tools, None).unwrap(),
+            "bash"
+        );
     }
 
     #[test]
@@ -1720,8 +1732,14 @@ mod tests {
             json!({ "type": "function", "function": { "name": "bash" } }),
             json!({ "type": "function", "function": { "name": "read" } }),
         ];
-        assert_eq!(resolve_emulated_tool_name("cat", &tools, None).unwrap(), "read");
-        assert_eq!(resolve_emulated_tool_name("open", &tools, None).unwrap(), "read");
+        assert_eq!(
+            resolve_emulated_tool_name("cat", &tools, None).unwrap(),
+            "read"
+        );
+        assert_eq!(
+            resolve_emulated_tool_name("open", &tools, None).unwrap(),
+            "read"
+        );
     }
 
     #[test]
