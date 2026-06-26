@@ -17,6 +17,7 @@ type SyncResult =
   | { ok: true; count: number; errors?: string[] }
   | { ok: false; error: string };
 type ConversationDetail = Awaited<ReturnType<ProviderAdapter["getConversation"]>>;
+type SyncSuccess = Extract<SyncResult, { ok: true }>;
 
 const AUTO_INGEST_DEBOUNCE_MS = 30_000;
 const E2E_SCAN_ATTEMPTS = 20;
@@ -36,6 +37,19 @@ function retryDelayMs(error: unknown, attempt: number): number {
   const message = error instanceof Error ? error.message : String(error);
   if (/\b429\b/.test(message)) return 8_000 * attempt;
   return 1_500 * attempt;
+}
+
+function isSyncSuccess(result: SyncResult): result is SyncSuccess {
+  return result.ok;
+}
+
+function formatSyncResult(result: SyncResult, prefix: string): string {
+  if (isSyncSuccess(result)) {
+    return result.errors?.length
+      ? `${prefix} synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
+      : `${prefix} synced ${result.count} conversations across providers.`;
+  }
+  return `${prefix} sync failed: ${result.error}`;
 }
 
 async function getConversationWithRetry(adapter: ProviderAdapter, id: string): Promise<ConversationDetail> {
@@ -78,9 +92,7 @@ async function runE2ESyncFromOpenTabs(source: string): Promise<boolean> {
     const result = await syncAll();
     await saveSettings({
       lastSyncAt: new Date().toISOString(),
-      lastResult: result.errors?.length
-        ? `E2E synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
-        : `E2E synced ${result.count} conversations across providers.`,
+      lastResult: formatSyncResult(result, "E2E"),
     });
     console.info("[polychat-ai] e2e sync result", result);
     return true;
@@ -108,7 +120,7 @@ async function retryE2ESyncFromOpenTabs(source: string): Promise<void> {
 }
 
 if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
-  chrome.runtime.onInstalled.addListener((details) => {
+  chrome.runtime.onInstalled.addListener((details: { reason: string }) => {
     if (details.reason !== "install" && details.reason !== "update") return;
     void retryE2ESyncFromOpenTabs(`installed:${details.reason}`);
   });
@@ -309,8 +321,9 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
       if (!settings.ingestToken.trim()) return;
       const senderTab = sender?.tab ?? null;
       const senderTabId = typeof senderTab?.id === "number" && senderTab.id >= 0 ? senderTab.id : null;
-      const url = typeof (typed as { url?: string }).url === "string" ? (typed as { url?: string }).url : "";
-      if (url.includes("polychat-auto")) return;
+      const pageReady = typed as { url?: string | null; conversationId?: string | null };
+      const url = typeof pageReady.url === "string" ? pageReady.url : null;
+      if (!url || url.includes("polychat-auto")) return;
       if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
         const e2eParams = getE2EParamsFromUrl(url);
         if (e2eParams) {
@@ -321,9 +334,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
             const result = await syncAll();
             await saveSettings({
               lastSyncAt: new Date().toISOString(),
-              lastResult: result.errors?.length
-                ? `E2E synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
-                : `E2E synced ${result.count} conversations across providers.`,
+              lastResult: formatSyncResult(result, "E2E"),
             });
           } catch (error) {
             await saveSettings({
@@ -334,9 +345,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
           return;
         }
       }
-      const conversationId = typeof (typed as { conversationId?: string | null }).conversationId === "string"
-        ? (typed as { conversationId?: string }).conversationId
-        : null;
+      const conversationId = typeof pageReady.conversationId === "string" ? pageReady.conversationId : null;
       if (!rememberAutoIngest(provider, conversationId, url)) return;
       try {
         if (senderTabId !== null) {

@@ -55,6 +55,7 @@ describe("Production readiness", () => {
 
   it("package metadata supports npm release checks and binary artifacts", () => {
     const pkg = readJson("package.json");
+    const extensionPkg = readJson("apps/extension/package.json");
     assert.equal(pkg.name, "polychat-ai");
     assert.deepEqual(pkg.files.includes("bin"), true);
     assert.match(pkg.scripts.prepack, /npm run build/);
@@ -66,6 +67,7 @@ describe("Production readiness", () => {
     assert.equal(pkg.scripts["verify:package:all"], "node scripts/verify-package.mjs --all");
     assert.equal(pkg.scripts.prepublishOnly, "npm run verify && npm run verify:package:all");
     assert.equal(pkg.scripts["pack:check"], "npm pack --dry-run");
+    assert.match(extensionPkg.scripts.build, /tsc -p tsconfig\.json --noEmit/);
     assert.ok(pkg.repository?.url, "repository URL must be present");
     assert.ok(pkg.bugs?.url, "bugs URL must be present");
     assert.ok(pkg.homepage, "homepage must be present");

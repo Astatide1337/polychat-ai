@@ -35,6 +35,9 @@ type SyncResult = {
   ok: true;
   count: number;
   errors?: string[];
+} | {
+  ok: false;
+  error: string;
 };
 
 type ConversationDetail = Awaited<ReturnType<ProviderAdapter["getConversation"]>>;
@@ -259,7 +262,7 @@ async function syncConversation() {
 }
 
 async function syncTestConversation(provider: "chatgpt" | "claude" | "gemini") {
-  if (!EXTENSION_TEST_MODE) {
+  if (!process.env.POLYCHAT_EXTENSION_TEST_MODE) {
     setText(result, "test mode disabled");
     return;
   }

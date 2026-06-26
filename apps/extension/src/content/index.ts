@@ -325,8 +325,8 @@ function extractGeminiWizMessages(): { messages: SnapshotResponse["messages"]; r
 
   if (candidates.length < 2) return { messages: [], rows: [] };
 
-  const clusters: Array<Array<{ index: number; text: string }>> = [];
-  let current: Array<{ index: number; text: string }> = [candidates[0]];
+  const clusters: Array<Array<{ index: number; text: string; row: unknown[] }>> = [];
+  let current: Array<{ index: number; text: string; row: unknown[] }> = [candidates[0]];
   for (let i = 1; i < candidates.length; i += 1) {
     const candidate = candidates[i];
     const previous = current[current.length - 1];
