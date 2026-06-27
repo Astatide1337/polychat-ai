@@ -1,11 +1,13 @@
 //! Gemini provider — cookie-backed, no browser at runtime.
 //!
 //! Login: CDP browser at gemini.google.com — captures Google session cookies.
-//! Runtime: Gemini web API (BardChatUi StreamGenerate) with SNlM0e access token.
+//! Runtime: Gemini web API (BardChatUi StreamGenerate) with f.sid + xsrf bootstrap.
 //!
-//! Auth flow (per gemini-webapi library):
-//! 1. GET https://gemini.google.com/app with session cookies → extract SNlM0e, build_label, f.sid
-//! 2. POST StreamGenerate with f.req=[null, json(inner_req_list)] and at=SNlM0e
+//! Auth flow:
+//! 1. GET https://gemini.google.com/app with session cookies → extract build_label
+//! 2. POST the Gemini RPC once without `at` to receive a 400 xsrf bootstrap response
+//! 3. Retry the RPC with the returned xsrf token in `at`
+//! 4. Preserve the page bootstrap `f.sid` query parameter observed in live browser traffic
 //!
 //! Conversation continuity:
 //! - Gemini conversations are identified by metadata (cid, rid, rcid) stored in inner_req_list[2].
@@ -18,9 +20,8 @@
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use reqwest::header::{
-    HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, USER_AGENT,
-};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
+use reqwest::StatusCode;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -72,9 +73,8 @@ fn default_metadata() -> Value {
 #[derive(Debug, Clone)]
 struct GeminiSession {
     cookie_header: String,
-    access_token: String, // SNlM0e
-    build_label: String,  // boq_... label
-    session_id: String,   // f.sid
+    build_label: String, // boq_... label
+    session_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,25 +105,10 @@ fn extract_cookie_header(session: &Value) -> anyhow::Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Extract SNlM0e, build label, session ID from Gemini app page HTML
+// Extract the Gemini build label from the app page HTML
 // ---------------------------------------------------------------------------
 
-fn extract_gemini_tokens(html: &str) -> (String, String, String) {
-    // SNlM0e access token — appears as "SNlM0e":"<value>"
-    let access_token = {
-        let needle = "\"SNlM0e\":\"";
-        if let Some(start) = html.find(needle) {
-            let rest = &html[start + needle.len()..];
-            if let Some(end) = rest.find('"') {
-                rest[..end].to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    };
-
+fn extract_gemini_build_label(html: &str) -> String {
     // Build label — appears as "cfb2h":"boq_..." or query param bl=boq_...
     let build_label = {
         let needle = "\"cfb2h\":\"";
@@ -140,22 +125,18 @@ fn extract_gemini_tokens(html: &str) -> (String, String, String) {
         }
     };
 
-    // Session ID f.sid
-    let session_id = {
-        let needle = "\"FdrFJe\":\"";
-        if let Some(start) = html.find(needle) {
-            let rest = &html[start + needle.len()..];
-            if let Some(end) = rest.find('"') {
-                rest[..end].to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    };
+    build_label
+}
 
-    (access_token, build_label, session_id)
+fn extract_gemini_session_id(html: &str) -> String {
+    let needle = "\"FdrFJe\":\"";
+    if let Some(start) = html.find(needle) {
+        let rest = &html[start + needle.len()..];
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +165,7 @@ impl GeminiProvider {
             bail!("Gemini session has no cookies — run polychat login gemini");
         }
 
-        // Fetch the Gemini app page to get SNlM0e, build_label, session_id
+        // Fetch the Gemini app page to get the current build label.
         let mut headers = HeaderMap::new();
         headers.insert(
             COOKIE,
@@ -217,18 +198,47 @@ impl GeminiProvider {
         }
 
         let html = res.text().await.context("reading Gemini app page body")?;
-        let (access_token, build_label, session_id) = extract_gemini_tokens(&html);
-
-        if access_token.is_empty() {
-            bail!("Could not extract SNlM0e token from Gemini page — session may be expired");
-        }
+        let build_label = extract_gemini_build_label(&html);
+        let session_id = extract_gemini_session_id(&html);
 
         Ok(GeminiSession {
             cookie_header,
-            access_token,
             build_label,
             session_id,
         })
+    }
+
+    fn build_request_headers(sess: &GeminiSession, model: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&sess.cookie_header)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded;charset=utf-8"),
+        );
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://gemini.google.com/"),
+        );
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+            ),
+        );
+        headers.insert("X-Same-Domain", HeaderValue::from_static("1"));
+        if let Some(model) = model {
+            headers.insert("x-goog-ext-73010989-jspb", HeaderValue::from_static("[0]"));
+            headers.insert(
+                "x-goog-ext-525001261-jspb",
+                HeaderValue::from_static(Self::model_request_header(model)),
+            );
+        }
+        headers
     }
 
     fn model_request_header(model: &str) -> &'static str {
@@ -242,42 +252,128 @@ impl GeminiProvider {
         }
     }
 
-    fn build_request_headers(sess: &GeminiSession, model: &str, request_uuid: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            COOKIE,
-            HeaderValue::from_str(&sess.cookie_header)
-                .unwrap_or_else(|_| HeaderValue::from_static("")),
-        );
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/x-www-form-urlencoded;charset=utf-8"),
-        );
-        headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://gemini.google.com"),
-        );
-        headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://gemini.google.com/"),
-        );
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(
-                "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+    fn build_form_body(f_req: &str, at: Option<&str>) -> String {
+        match at {
+            Some(token) if !token.trim().is_empty() => format!(
+                "at={}&f.req={}",
+                urlencoding::encode(token),
+                urlencoding::encode(f_req)
             ),
+            _ => format!("f.req={}", urlencoding::encode(f_req)),
+        }
+    }
+
+    fn extract_xsrf_token(body: &str) -> Option<String> {
+        let needle = "\"xsrf\",\"";
+        let start = body.find(needle)?;
+        let rest = &body[start + needle.len()..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    fn conversation_source_path(conversation_id: Option<&str>) -> String {
+        let _ = conversation_id;
+        "/app".to_string()
+    }
+
+    fn build_batchexecute_url(sess: &GeminiSession, rpcid: &str, source_path: &str) -> String {
+        let mut url = format!(
+            "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids={}&source-path={}&hl=en-US&rt=c",
+            urlencoding::encode(rpcid),
+            urlencoding::encode(source_path)
         );
-        headers.insert("X-Same-Domain", HeaderValue::from_static("1"));
-        headers.insert(
-            "x-goog-ext-525005358-jspb",
-            HeaderValue::from_str(request_uuid).unwrap_or_else(|_| HeaderValue::from_static("")),
+        if !sess.build_label.is_empty() {
+            url.push_str(&format!("&bl={}", urlencoding::encode(&sess.build_label)));
+        }
+        if !sess.session_id.is_empty() {
+            url.push_str(&format!("&f.sid={}", urlencoding::encode(&sess.session_id)));
+        }
+        url.push_str(&format!("&_reqid={}", rand_reqid()));
+        url
+    }
+
+    fn build_stream_url(sess: &GeminiSession, source_path: &str) -> String {
+        let mut url = format!(
+            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?hl=en-US&rt=c&source-path={}",
+            urlencoding::encode(source_path)
         );
-        headers.insert("x-goog-ext-73010989-jspb", HeaderValue::from_static("[0]"));
-        headers.insert(
-            "x-goog-ext-525001261-jspb",
-            HeaderValue::from_static(Self::model_request_header(model)),
+        if !sess.build_label.is_empty() {
+            url.push_str(&format!("&bl={}", urlencoding::encode(&sess.build_label)));
+        }
+        if !sess.session_id.is_empty() {
+            url.push_str(&format!("&f.sid={}", urlencoding::encode(&sess.session_id)));
+        }
+        url.push_str(&format!("&_reqid={}", rand_reqid()));
+        url
+    }
+
+    async fn post_form_with_xsrf(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        body_without_at: &str,
+        context: &str,
+    ) -> anyhow::Result<reqwest::Response> {
+        let first = self
+            .client
+            .post(url)
+            .headers(headers.clone())
+            .body(body_without_at.to_string())
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .with_context(|| format!("sending {} bootstrap request", context))?;
+
+        if first.status().is_success() {
+            return Ok(first);
+        }
+
+        let status = first.status();
+        let body = first
+            .text()
+            .await
+            .with_context(|| format!("reading {} bootstrap response", context))?;
+
+        if status != StatusCode::BAD_REQUEST {
+            bail!(
+                "{} bootstrap failed: {} {}",
+                context,
+                status,
+                &body[..body.len().min(240)]
+            );
+        }
+
+        let xsrf = Self::extract_xsrf_token(&body).with_context(|| {
+            format!(
+                "{} bootstrap response did not include an xsrf token: {}",
+                context,
+                &body[..body.len().min(240)]
+            )
+        })?;
+        let body_with_at = format!("at={}&{}", urlencoding::encode(&xsrf), body_without_at);
+
+        let second = self
+            .client
+            .post(url)
+            .headers(headers.clone())
+            .body(body_with_at)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .with_context(|| format!("sending {} request", context))?;
+
+        if second.status().is_success() {
+            return Ok(second);
+        }
+
+        let second_status = second.status();
+        let second_body = second.text().await.unwrap_or_default();
+        bail!(
+            "{} failed: {} {}",
+            context,
+            second_status,
+            &second_body[..second_body.len().min(240)]
         );
-        headers
     }
 
     /// Build the f.req body for StreamGenerate.
@@ -356,29 +452,12 @@ impl GeminiProvider {
             .filter(|v| v.is_array())
     }
 
-    /// Build the URL for a BardChatUi RPC call.
-    fn build_bard_url(sess: &GeminiSession, rpc_path: &str) -> String {
-        let mut url = format!(
-            "https://gemini.google.com/_/BardChatUi/data/{}?hl=en&pageId=none&rt=c",
-            rpc_path
-        );
-        if !sess.build_label.is_empty() {
-            url.push_str(&format!("&bl={}", urlencoding::encode(&sess.build_label)));
-        }
-        if !sess.session_id.is_empty() {
-            url.push_str(&format!("&f.sid={}", urlencoding::encode(&sess.session_id)));
-        }
-        url.push_str(&format!("&_reqid={}", rand_reqid()));
-        url
-    }
-
     /// List conversations via the batchexecute RPC endpoint.
     ///
     /// Uses rpcid "MaZiqc" (GRPC.LIST_CHATS) to fetch both pinned and unpinned chats.
     async fn list_conversations_impl(&self) -> anyhow::Result<Vec<ProviderConversation>> {
         let sess = self.get_session().await?;
-        let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
-        let headers = Self::build_request_headers(&sess, "gemini-3.5-flash", &request_uuid);
+        let headers = Self::build_request_headers(&sess, None);
 
         // Fetch pinned and unpinned chats in parallel
         let (pinned_res, unpinned_res) = tokio::join!(
@@ -415,39 +494,16 @@ impl GeminiProvider {
         let freq_inner = json!(["MaZiqc", payload_str, Value::Null, "generic"]);
         let freq = serde_json::to_string(&json!([[freq_inner]]))?;
 
-        // batchexecute URL requires rpcids and source-path query params
-        let mut url = format!(
-            "https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=MaZiqc&hl=en&rt=c&source-path=%2Fapp"
-        );
-        if !sess.build_label.is_empty() {
-            url.push_str(&format!("&bl={}", urlencoding::encode(&sess.build_label)));
-        }
-        if !sess.session_id.is_empty() {
-            url.push_str(&format!("&f.sid={}", urlencoding::encode(&sess.session_id)));
-        }
-        url.push_str(&format!("&_reqid={}", rand_reqid()));
-
-        let body_params = format!(
-            "at={}&f.req={}",
-            urlencoding::encode(&sess.access_token),
-            urlencoding::encode(&freq)
-        );
+        let url = Self::build_batchexecute_url(&sess, "MaZiqc", "/app");
+        let body_params = Self::build_form_body(&freq, None);
 
         let res = self
-            .client
-            .post(&url)
-            .headers(headers.clone())
-            .body(body_params)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
+            .post_form_with_xsrf(&url, headers, &body_params, "Gemini batchexecute")
+            .await?;
+        let body = res
+            .text()
             .await
-            .context("Gemini batchexecute request")?;
-
-        if !res.status().is_success() {
-            bail!("Gemini batchexecute returned {}", res.status());
-        }
-
-        let body = res.text().await.context("reading batchexecute response")?;
+            .context("reading Gemini batchexecute response")?;
         parse_chat_list(&body)
     }
 }
@@ -613,13 +669,13 @@ impl Provider for GeminiProvider {
     async fn send_message(
         &self,
         messages: &[ChatMessage],
-        model: &str,
+        _model: &str,
         options: &ChatOptions,
         conversation_id: Option<&str>,
     ) -> anyhow::Result<ProviderResponse> {
         let sess = self.get_session().await?;
         let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
-        let headers = Self::build_request_headers(&sess, model, &request_uuid);
+        let headers = Self::build_request_headers(&sess, Some(_model));
 
         // Build the prompt from all messages
         let prompt = messages
@@ -633,34 +689,12 @@ impl Provider for GeminiProvider {
 
         let f_req = Self::build_f_req(&prompt, metadata, options.temporary, &request_uuid)?;
 
-        // URL params
-        let url = Self::build_bard_url(&sess, "assistant.lamda.BardFrontendService/StreamGenerate");
-
-        // Body: application/x-www-form-urlencoded
-        let body_params = format!(
-            "at={}&f.req={}",
-            urlencoding::encode(&sess.access_token),
-            urlencoding::encode(&f_req)
-        );
+        let url = Self::build_stream_url(&sess, &Self::conversation_source_path(conversation_id));
+        let body_params = Self::build_form_body(&f_req, None);
 
         let res = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .body(body_params)
-            .send()
-            .await
-            .context("Gemini StreamGenerate request")?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let body_text = res.text().await.unwrap_or_default();
-            bail!(
-                "Gemini StreamGenerate failed: {} {}",
-                status,
-                &body_text[..body_text.len().min(200)]
-            );
-        }
+            .post_form_with_xsrf(&url, &headers, &body_params, "Gemini StreamGenerate")
+            .await?;
 
         // Capture conversation metadata from the first response chunk via oneshot channel.
         // Same pattern as ChatGPT's conversation_id capture.
@@ -871,6 +905,15 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_xsrf_token() {
+        let body = r#"["er",null,null,null,null,400,[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,["xsrf","AD1_LW7szNjU2Ybg-duXOvDu-3Ae:1782538841854",null]]]"#;
+        assert_eq!(
+            GeminiProvider::extract_xsrf_token(body),
+            Some("AD1_LW7szNjU2Ybg-duXOvDu-3Ae:1782538841854".to_string())
+        );
+    }
+
+    #[test]
     fn test_model_request_header_uses_selected_model() {
         assert_eq!(
             GeminiProvider::model_request_header("gemini-3.1-pro"),
@@ -887,19 +930,53 @@ mod tests {
     }
 
     #[test]
-    fn test_build_bard_url_includes_page_id() {
+    fn test_conversation_source_path_uses_app_root() {
+        let metadata = json!([
+            "c_abc123",
+            "rid456",
+            "rcid789",
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            ""
+        ]);
+        let metadata_str = serde_json::to_string(&metadata).unwrap();
+        assert_eq!(GeminiProvider::conversation_source_path(Some("abc123")), "/app");
+        assert_eq!(GeminiProvider::conversation_source_path(Some("c_abc123")), "/app");
+        assert_eq!(GeminiProvider::conversation_source_path(Some(&metadata_str)), "/app");
+    }
+
+    #[test]
+    fn test_build_stream_url_includes_source_path() {
         let sess = GeminiSession {
             cookie_header: "SID=abc".into(),
-            access_token: "token".into(),
             build_label: "boq_label".into(),
             session_id: "sid123".into(),
         };
-        let url = GeminiProvider::build_bard_url(
-            &sess,
-            "assistant.lamda.BardFrontendService/StreamGenerate",
-        );
-        assert!(url.contains("pageId=none"));
-        assert!(url.contains("hl=en"));
+        let url = GeminiProvider::build_stream_url(&sess, "/app/abc123");
+        assert!(url.contains("hl=en-US"));
+        assert!(url.contains("rt=c"));
+        assert!(url.contains("source-path=%2Fapp%2Fabc123"));
+        assert!(url.contains("bl=boq_label"));
+        assert!(url.contains("f.sid=sid123"));
+        assert!(!url.contains("pageId=none"));
+    }
+
+    #[test]
+    fn test_build_batchexecute_url_includes_source_path() {
+        let sess = GeminiSession {
+            cookie_header: "SID=abc".into(),
+            build_label: "boq_label".into(),
+            session_id: "sid123".into(),
+        };
+        let url = GeminiProvider::build_batchexecute_url(&sess, "MaZiqc", "/app/abc123");
+        assert!(url.contains("rpcids=MaZiqc"));
+        assert!(url.contains("source-path=%2Fapp%2Fabc123"));
+        assert!(url.contains("hl=en-US"));
+        assert!(url.contains("rt=c"));
         assert!(url.contains("bl=boq_label"));
         assert!(url.contains("f.sid=sid123"));
     }

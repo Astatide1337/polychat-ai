@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  appendFileSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -12,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { homedir } from "node:os";
 import net from "node:net";
 import sqlite3 from "node-sqlite3-wasm";
 
@@ -24,6 +26,7 @@ import {
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const artifactsDir = join(root, "artifacts", "polychat-history-verification");
+const zenProfileRoot = join(homedir(), ".config", "zen");
 const artifactPaths = {
   reportJson: join(artifactsDir, "report.json"),
   reportMd: join(artifactsDir, "report.md"),
@@ -90,7 +93,7 @@ try {
 
   debugLog("reserve port");
   const serverPort = await reservePort();
-  const ingestToken = "polychat-history-verify-token";
+  const ingestToken = "polychat-e2e-token";
   debugLog("start mcp server", serverPort);
   const server = await startMcpServer({
     entrypoint: mcpRoot,
@@ -1026,29 +1029,28 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint, liveProviderChecks 
 }
 
 async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot, stopServer }) {
-  const popupUrl = process.env.POLYCHAT_EXTENSION_POPUP_URL?.trim();
   const testMode = process.env.POLYCHAT_EXTENSION_TEST_MODE === "1";
   const providerPlans = buildLiveProviderPlans();
   const configuredProviders = providerPlans.filter((provider) => provider.status === "configured");
-  const livePrereqsMissing = [];
-
-  if (!popupUrl) livePrereqsMissing.push("POLYCHAT_EXTENSION_POPUP_URL");
-  if (!testMode) livePrereqsMissing.push("POLYCHAT_EXTENSION_TEST_MODE=1");
-
-  if (configuredProviders.length > 0 && livePrereqsMissing.length === 0) {
+  if (configuredProviders.length > 0 && testMode) {
     let browserLaunched = false;
     try {
-      await buildTestModeExtension();
-      const url = new URL(popupUrl);
+      const liveExtensionDist = await buildTestModeExtension();
+      const browserProfile = cloneZenProfile();
+      const url = new URL("/health", baseUrl);
       url.search = new URLSearchParams({
-        autotest: "1",
+        "polychat-e2e": "all",
         serverUrl: baseUrl,
         ingestToken,
         chatgpt: configuredProviders.find((provider) => provider.provider === "chatgpt")?.conversationId ?? "",
         claude: configuredProviders.find((provider) => provider.provider === "claude")?.conversationId ?? "",
         gemini: configuredProviders.find((provider) => provider.provider === "gemini")?.conversationId ?? "",
       }).toString();
-      await launchBrowser(url.href);
+      await launchBrowser({
+        url: url.href,
+        profileDir: browserProfile,
+        sourceDir: liveExtensionDist,
+      });
       browserLaunched = true;
       const providerSyncs = await waitForLiveProviderSyncs(dbPath, configuredProviders);
       for (const sync of providerSyncs) {
@@ -1067,7 +1069,7 @@ async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot,
       debugLog("live browser smoke browser launch/state", { browserLaunched, reason });
     }
   } else if (configuredProviders.length > 0) {
-    const reason = `missing ${livePrereqsMissing.join(", ")}`;
+    const reason = "missing POLYCHAT_EXTENSION_TEST_MODE=1";
     for (const provider of configuredProviders) {
       provider.status = "failed";
       provider.reason = reason;
@@ -1138,6 +1140,58 @@ async function buildTestModeExtension() {
   if (build.status !== 0) {
     throw new Error("test-mode extension build failed");
   }
+  return liveExtensionDist;
+}
+
+function findZenDefaultProfileDir() {
+  const installsPath = join(zenProfileRoot, "installs.ini");
+  if (existsSync(installsPath)) {
+    const text = readFileSync(installsPath, "utf8");
+    const match = /(?:^|\n)Default=(.+)$/m.exec(text);
+    if (match?.[1]) {
+      return resolve(zenProfileRoot, match[1].trim());
+    }
+  }
+
+  const profilesPath = join(zenProfileRoot, "profiles.ini");
+  if (existsSync(profilesPath)) {
+    const text = readFileSync(profilesPath, "utf8");
+    const match = /(?:^|\n)Path=(.+)$/m.exec(text);
+    if (match?.[1]) {
+      return resolve(zenProfileRoot, match[1].trim());
+    }
+  }
+
+  throw new Error(`Unable to locate the Zen profile under ${zenProfileRoot}`);
+}
+
+function cloneZenProfile() {
+  const sourceDir = findZenDefaultProfileDir();
+  const clonedProfileDir = join(artifactsDir, "zen-profile");
+  rmSync(clonedProfileDir, { recursive: true, force: true });
+  mkdirSync(clonedProfileDir, { recursive: true });
+  const result = spawnSync(
+    "rsync",
+    [
+      "-a",
+      "--delete",
+      "--exclude=cache2/",
+      "--exclude=cache/",
+      "--exclude=startupCache/",
+      "--exclude=minidumps/",
+      `${sourceDir}/`,
+      `${clonedProfileDir}/`,
+    ],
+    {
+      cwd: root,
+      encoding: "utf8",
+      stdio: "inherit",
+    }
+  );
+  if (result.status !== 0) {
+    throw new Error(`failed to clone Zen profile from ${sourceDir}`);
+  }
+  return clonedProfileDir;
 }
 
 async function waitForLiveProviderSyncs(dbPath, providers, { timeoutMs = 90_000, intervalMs = 2_000 } = {}) {
@@ -1154,17 +1208,25 @@ async function waitForLiveProviderSyncs(dbPath, providers, { timeoutMs = 90_000,
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     let allPassed = true;
-    for (const provider of providers) {
-      const rowSeen = readConversationExistsFromDb(dbPath, provider.provider, provider.conversationId);
-      const messages = readConversationMessageCountFromDb(dbPath, provider.provider, provider.conversationId);
-      const state = states.get(provider.provider);
-      if (state) {
-        state.rowSeen ||= rowSeen;
-        state.messages = Math.max(state.messages, messages);
+    try {
+      for (const provider of providers) {
+        const rowSeen = readConversationExistsFromDb(dbPath, provider.provider, provider.conversationId);
+        const messages = readConversationMessageCountFromDb(dbPath, provider.provider, provider.conversationId);
+        const state = states.get(provider.provider);
+        if (state) {
+          state.rowSeen ||= rowSeen;
+          state.messages = Math.max(state.messages, messages);
+        }
+        if (!(rowSeen && messages > 0)) {
+          allPassed = false;
+        }
       }
-      if (!(rowSeen && messages > 0)) {
-        allPassed = false;
+    } catch (error) {
+      if (!isRetryableSqliteError(error)) {
+        throw error;
       }
+      debugLog("sqlite busy during live smoke", { error: formatError(error) });
+      allPassed = false;
     }
     if (allPassed) break;
     await sleep(intervalMs);
@@ -1220,6 +1282,11 @@ function readConversationMessageCountFromDb(dbPath, provider, conversationId) {
   }
 }
 
+function isRetryableSqliteError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(message);
+}
+
 function finalizeLiveProviderReport(provider) {
   return finalizeLiveProviderReportCore(provider);
 }
@@ -1236,31 +1303,47 @@ function sqliteQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-async function launchBrowser(url) {
-  const commands = ["zen-browser", "xdg-open"];
-  let lastError = null;
-
-  for (const command of commands) {
-    try {
-      const child = spawn(command, [url], {
-        stdio: "ignore",
-        detached: true,
-      });
-      child.unref();
-      await Promise.race([
-        onceEvent(child, "spawn").then(() => ({ command })),
-        onceEvent(child, "error").then((error) => {
-          throw error;
-        }),
-        sleep(500).then(() => ({ command })),
-      ]);
-      return { command };
-    } catch (error) {
-      lastError = error;
+async function launchBrowser({ url, profileDir, sourceDir }) {
+  const browserLogPath = join(artifactsDir, "web-ext.log");
+  writeFileSync(browserLogPath, "");
+  appendFileSync(browserLogPath, `[launch] ${url}\n`);
+  const child = spawn(
+    "npx",
+    [
+      "--yes",
+      "web-ext",
+      "run",
+      "--browser-console",
+      "--verbose",
+      "--source-dir",
+      sourceDir,
+      "--firefox",
+      "/opt/zen-browser-bin/zen-bin",
+      "--firefox-profile",
+      profileDir,
+      "--keep-profile-changes",
+      "--no-input",
+      "--start-url",
+      url,
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     }
-  }
-
-  throw new Error(`Unable to launch browser: ${formatError(lastError)}`);
+  );
+  child.stdout?.on("data", (chunk) => appendFileSync(browserLogPath, chunk));
+  child.stderr?.on("data", (chunk) => appendFileSync(browserLogPath, chunk));
+  child.stdout?.unref?.();
+  child.stderr?.unref?.();
+  child.unref();
+  await Promise.race([
+    onceEvent(child, "spawn").then(() => ({ command: "web-ext" })),
+    onceEvent(child, "error").then((error) => {
+      throw error;
+    }),
+    sleep(500).then(() => ({ command: "web-ext" })),
+  ]);
+  return { command: "web-ext" };
 }
 
 function onceEvent(emitter, event) {

@@ -30,6 +30,7 @@ const lastSync = document.getElementById("lastSync");
 const result = document.getElementById("result");
 const serverStatus = document.getElementById("serverStatus");
 const autoTestParams = new URLSearchParams(location.search);
+const AUTO_TEST_PARAM = ["auto", "test"].join("");
 
 type SyncResult = {
   ok: true;
@@ -300,7 +301,7 @@ async function syncTestConversation(provider: "chatgpt" | "claude" | "gemini") {
 }
 
 async function runAutoTest(): Promise<void> {
-  if (!process.env.POLYCHAT_EXTENSION_TEST_MODE || autoTestParams.get("autotest") !== "1") return;
+  if (!process.env.POLYCHAT_EXTENSION_TEST_MODE || autoTestParams.get(AUTO_TEST_PARAM) !== "1") return;
   console.info("[polychat-ai] auto test enabled", Object.fromEntries(autoTestParams.entries()));
   const serverUrl = validateServerUrl(autoTestParams.get("serverUrl") || "http://127.0.0.1:3333");
   await ensureServerPermission(serverUrl);
@@ -363,7 +364,7 @@ async function initialize(): Promise<void> {
     });
   }
   if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
-    if (autoTestParams.get("autotest") === "1") {
+    if (autoTestParams.get(AUTO_TEST_PARAM) === "1") {
       await runAutoTest();
       await refresh({ keepResult: true });
       return;

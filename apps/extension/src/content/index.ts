@@ -18,6 +18,8 @@ type MessageRole = SnapshotResponse["messages"][number]["role"];
 function detectConversationId(url: string): string | null {
   const chatMatch = /\/c\/([A-Za-z0-9-]+)/.exec(url);
   if (chatMatch) return chatMatch[1];
+  const claudeMatch = /\/chat\/([A-Za-z0-9-]+)/.exec(url);
+  if (claudeMatch) return claudeMatch[1];
   const geminiMatch = /\/app\/([A-Za-z0-9-_]+)/.exec(url);
   if (geminiMatch && geminiMatch[1] && geminiMatch[1] !== "app") return decodeURIComponent(geminiMatch[1]);
   const genericMatch = /[?&]conversation_id=([^&]+)/.exec(url);

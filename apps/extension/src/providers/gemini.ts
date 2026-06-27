@@ -4,23 +4,23 @@ import {
   type ProviderAdapter,
 } from "@polychat-ai/history-core/browser";
 
+import { extractGeminiWizDataFromHtml, extractGeminiWizMessagesFromData } from "./gemini-wiz.js";
+
 type GeminiListEntry = Array<unknown>;
 
 type GeminiSession = {
-  accessToken: string;
   buildLabel: string;
   sessionId: string;
 };
 
-function extractGeminiTokens(html: string): GeminiSession {
-  const accessTokenMatch = /"SNlM0e":"([^"]+)"/.exec(html);
+function extractGeminiBuildLabel(html: string): string {
   const buildLabelMatch = /"cfb2h":"([^"]+)"/.exec(html);
+  return buildLabelMatch?.[1] ?? "boq_assistant-bard-web-server_20240717.22_p0";
+}
+
+function extractGeminiSessionId(html: string): string {
   const sessionIdMatch = /"FdrFJe":"([^"]+)"/.exec(html);
-  return {
-    accessToken: accessTokenMatch?.[1] ?? "",
-    buildLabel: buildLabelMatch?.[1] ?? "boq_assistant-bard-web-server_20240717.22_p0",
-    sessionId: sessionIdMatch?.[1] ?? "",
-  };
+  return sessionIdMatch?.[1] ?? "";
 }
 
 async function loadGeminiSession(): Promise<GeminiSession> {
@@ -34,11 +34,10 @@ async function loadGeminiSession(): Promise<GeminiSession> {
     throw new Error(`Gemini app page failed: ${response.status}`);
   }
   const html = await response.text();
-  const session = extractGeminiTokens(html);
-  if (!session.accessToken) {
-    throw new Error("Could not extract Gemini app token");
-  }
-  return session;
+  return {
+    buildLabel: extractGeminiBuildLabel(html),
+    sessionId: extractGeminiSessionId(html),
+  };
 }
 
 function isoSeconds(value: unknown): string | null {
@@ -48,32 +47,68 @@ function isoSeconds(value: unknown): string | null {
   return new Date(seconds * 1000).toISOString();
 }
 
+function extractXsrfToken(body: string): string {
+  const match = /"xsrf","([^"]+)"/.exec(body);
+  return match?.[1] ?? "";
+}
+
+async function postFormWithXsrf(
+  url: string,
+  bodyWithoutAt: string,
+  headers: HeadersInit,
+  context: string
+): Promise<Response> {
+  const first = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers,
+    body: bodyWithoutAt,
+  });
+  if (first.ok) return first;
+  const firstText = await first.text();
+  if (first.status !== 400) {
+    throw new Error(`${context} bootstrap failed: ${first.status} ${firstText.slice(0, 240)}`);
+  }
+  const xsrf = extractXsrfToken(firstText);
+  if (!xsrf) {
+    throw new Error(`${context} bootstrap response missing xsrf token: ${firstText.slice(0, 240)}`);
+  }
+  const retryBody = new URLSearchParams(bodyWithoutAt);
+  retryBody.set("at", xsrf);
+  const second = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers,
+    body: retryBody.toString(),
+  });
+  if (!second.ok) {
+    const secondText = await second.text();
+    throw new Error(`${context} failed: ${second.status} ${secondText.slice(0, 240)}`);
+  }
+  return second;
+}
+
 async function fetchChatList(session: GeminiSession, pinned: boolean): Promise<GeminiListEntry[]> {
   const payload = JSON.stringify([13, null, [pinned ? 1 : 0, null, 1]]);
   const freq = JSON.stringify([[["MaZiqc", payload, null, "generic"]]]);
   const url = new URL("https://gemini.google.com/_/BardChatUi/data/batchexecute");
   url.searchParams.set("rpcids", "MaZiqc");
-  url.searchParams.set("hl", "en");
+  url.searchParams.set("hl", "en-US");
   url.searchParams.set("rt", "c");
   url.searchParams.set("source-path", "/app");
   if (session.buildLabel) url.searchParams.set("bl", session.buildLabel);
   if (session.sessionId) url.searchParams.set("f.sid", session.sessionId);
   url.searchParams.set("_reqid", String(Math.floor(100000 + Math.random() * 900000)));
-  const response = await fetch(
+  const response = await postFormWithXsrf(
     url.toString(),
+    new URLSearchParams({ "f.req": freq }).toString(),
     {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-        accept: "*/*",
-      },
-      body: new URLSearchParams({ "f.req": freq, at: session.accessToken }).toString(),
-    }
+      accept: "*/*",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "x-same-domain": "1",
+    },
+    "Gemini batchexecute"
   );
-  if (!response.ok) {
-    throw new Error(`Gemini request failed: ${response.status}`);
-  }
   const text = await response.text();
   const entries: GeminiListEntry[] = [];
   for (const line of text.split("\n")) {
@@ -100,29 +135,46 @@ async function fetchChatList(session: GeminiSession, pinned: boolean): Promise<G
   return entries;
 }
 
-async function batchExecute(session: GeminiSession, rpcid: string, payload: unknown): Promise<unknown[]> {
+async function batchExecute(
+  session: GeminiSession,
+  rpcid: string,
+  payload: unknown,
+  sourcePath = "/app"
+): Promise<unknown[]> {
   const freq = JSON.stringify([[[rpcid, JSON.stringify(payload), null, "generic"]]]);
   const url = new URL("https://gemini.google.com/_/BardChatUi/data/batchexecute");
   url.searchParams.set("rpcids", rpcid);
-  url.searchParams.set("hl", "en");
+  url.searchParams.set("hl", "en-US");
   url.searchParams.set("rt", "c");
-  url.searchParams.set("source-path", "/app");
+  url.searchParams.set("source-path", sourcePath);
   if (session.buildLabel) url.searchParams.set("bl", session.buildLabel);
   if (session.sessionId) url.searchParams.set("f.sid", session.sessionId);
   url.searchParams.set("_reqid", String(Math.floor(100000 + Math.random() * 900000)));
-  const response = await fetch(url.toString(), {
-    method: "POST",
+  const response = await postFormWithXsrf(
+    url.toString(),
+    new URLSearchParams({ "f.req": freq }).toString(),
+    {
+      accept: "*/*",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "x-same-domain": "1",
+    },
+    `Gemini ${rpcid}`
+  );
+  return parseBatchResponse(await response.text());
+}
+
+async function fetchConversationPageHtml(conversationId: string): Promise<string> {
+  const url = new URL(`https://gemini.google.com/app/${encodeURIComponent(conversationId)}`);
+  const response = await fetch(url, {
     credentials: "include",
     headers: {
-      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      accept: "*/*",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
-    body: new URLSearchParams({ "f.req": freq, at: session.accessToken }).toString(),
   });
   if (!response.ok) {
-    throw new Error(`Gemini ${rpcid} request failed: ${response.status}`);
+    throw new Error(`Gemini conversation page failed: ${response.status}`);
   }
-  return parseBatchResponse(await response.text());
+  return response.text();
 }
 
 function parseBatchResponse(text: string): unknown[] {
@@ -198,7 +250,11 @@ function parseCandidateContent(candidate: unknown, cid: string, rid: string, rci
 }
 
 async function readConversation(session: GeminiSession, id: string): Promise<unknown> {
-  const parts = await batchExecute(session, "hNvQHb", [id, 1000, null, 1, [1], [4], null, 1]);
+  const conversationId = id.trim();
+  if (!conversationId) {
+    throw new Error("conversation id required");
+  }
+  const parts = await batchExecute(session, "hNvQHb", [conversationId, 10, null, 1, [1], [4], null, 1], "/app");
   const messages: Array<Record<string, unknown>> = [];
   let rawBody: unknown = null;
 
@@ -214,46 +270,59 @@ async function readConversation(session: GeminiSession, id: string): Promise<unk
     rawBody = body;
     const turns = getNested(body, [0]);
     if (!Array.isArray(turns)) continue;
-    const blocks: Array<Array<Record<string, unknown>>> = [];
     for (const turn of turns) {
-      const rid = String(getNested(turn, [0, 1], ""));
-      const block: Array<Record<string, unknown>> = [];
       const userText = getNested(turn, [2, 0, 0]);
       if (typeof userText === "string" && userText.trim()) {
-        block.push({
-          id: `${id}:${rid || blocks.length}:user`,
+        messages.push({
+          id: `${conversationId}:${messages.length}:user`,
           role: "user",
           content: userText,
           raw: turn,
         });
       }
-      const candidates = getNested(turn, [3, 0]);
-      if (Array.isArray(candidates)) {
-        const candidateTexts = candidates.flatMap((candidate) => {
-          const rcid = String(getNested(candidate, [0], ""));
-          if (!rcid) return [];
-          const parsed = parseCandidateContent(candidate, id, rid, rcid);
-          return parsed.text
-            ? [{
-                id: `${id}:${rid || blocks.length}:${rcid}`,
-                role: "assistant",
-                content: parsed.text,
-                raw: parsed.raw,
-              }]
-            : [];
+
+      const modelText = getNested(turn, [3, 0, 0, 1, 0]);
+      if (typeof modelText === "string" && modelText.trim()) {
+        messages.push({
+          id: `${conversationId}:${messages.length}:assistant`,
+          role: "assistant",
+          content: modelText,
+          raw: turn,
         });
-        block.push(...candidateTexts);
       }
-      if (block.length > 0) blocks.push(block);
     }
-    messages.push(...blocks.reverse().flat());
-    break;
+  }
+
+  if (messages.length === 0) {
+    const html = await fetchConversationPageHtml(conversationId);
+    const wizData = extractGeminiWizDataFromHtml(html);
+    if (wizData) {
+      const wiz = extractGeminiWizMessagesFromData(wizData);
+      if (wiz.messages.length > 0) {
+        return {
+          id: conversationId,
+          cid: conversationId,
+          url: `https://gemini.google.com/app/${conversationId}`,
+          messages: wiz.messages,
+          raw: {
+            source: "page-html",
+            geminiWiz: {
+              rows: wiz.rows,
+            },
+          },
+        };
+      }
+    }
+  }
+
+  if (messages.length === 0) {
+    throw new Error(`Gemini conversation ${conversationId} did not return a readable transcript`);
   }
 
   return {
-    id,
-    cid: id,
-    url: `https://gemini.google.com/app/${id}`,
+    id: conversationId,
+    cid: conversationId,
+    url: `https://gemini.google.com/app/${conversationId}`,
     messages,
     raw: rawBody,
   };

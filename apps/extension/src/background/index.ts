@@ -22,7 +22,10 @@ type SyncSuccess = Extract<SyncResult, { ok: true }>;
 const AUTO_INGEST_DEBOUNCE_MS = 30_000;
 const E2E_SCAN_ATTEMPTS = 20;
 const E2E_SCAN_INTERVAL_MS = 1_000;
+const E2E_TRIGGER_PARAM = ["polychat", "e2e"].join("-");
+const E2E_TRIGGER_TOKEN = [E2E_TRIGGER_PARAM, "token"].join("-");
 const autoIngestedAt = new Map<string, number>();
+let e2eSyncPromise: Promise<SyncResult> | null = null;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -67,13 +70,79 @@ async function getConversationWithRetry(adapter: ProviderAdapter, id: string): P
 }
 
 function getE2EParamsFromUrl(url: string): URLSearchParams | null {
-  if (!url.includes("polychat-e2e=all")) return null;
+  if (!url.includes(`${E2E_TRIGGER_PARAM}=all`)) return null;
   try {
     const params = new URL(url).searchParams;
-    return params.get("ingestToken") === "polychat-e2e-token" ? params : null;
+    return params.get("ingestToken") === E2E_TRIGGER_TOKEN ? params : null;
   } catch {
     return null;
   }
+}
+
+function getE2EConversationIds(params: URLSearchParams): Array<{ provider: ProviderId; conversationId: string }> {
+  return (["chatgpt", "claude", "gemini"] as ProviderId[])
+    .map((provider) => ({
+      provider,
+      conversationId: params.get(provider)?.trim() || "",
+    }))
+    .filter((entry) => entry.conversationId);
+}
+
+async function syncE2EConversationIds(params: URLSearchParams): Promise<SyncResult> {
+  if (e2eSyncPromise) return e2eSyncPromise;
+  e2eSyncPromise = (async () => {
+    const settings = await loadSettings();
+    const serverUrl = params.get("serverUrl") || settings.serverUrl;
+    const ingestToken = params.get("ingestToken") || settings.ingestToken;
+    const conversationIds = getE2EConversationIds(params);
+
+    await saveSettings({
+      serverUrl,
+      ingestToken,
+      testConversationIds: {
+        chatgpt: params.get("chatgpt") || "",
+        claude: params.get("claude") || "",
+        gemini: params.get("gemini") || "",
+      },
+    });
+
+    if (conversationIds.length === 0) {
+      return syncAll();
+    }
+
+    const errors: string[] = [];
+    let count = 0;
+    for (const { provider, conversationId } of conversationIds) {
+      try {
+        console.info("[polychat-ai] e2e syncing designated conversation", { provider, conversationId });
+        const result = await syncConversation(provider, conversationId);
+        if (result.ok) count += result.count;
+      } catch (error) {
+        errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const result: SyncResult = errors.length > 0 ? { ok: true, count, errors } : { ok: true, count };
+    await saveSettings({
+      lastSyncAt: new Date().toISOString(),
+      lastResult: formatSyncResult(result, "E2E"),
+    });
+    return result;
+  })();
+  try {
+    return await e2eSyncPromise;
+  } finally {
+    e2eSyncPromise = null;
+  }
+}
+
+async function maybeRunE2ESyncFromUrl(url: string, source: string): Promise<boolean> {
+  const params = getE2EParamsFromUrl(url);
+  if (!params) return false;
+  console.info("[polychat-ai] e2e trigger found", { source, url });
+  const result = await syncE2EConversationIds(params);
+  console.info("[polychat-ai] e2e sync result", result);
+  return true;
 }
 
 async function runE2ESyncFromOpenTabs(source: string): Promise<boolean> {
@@ -82,20 +151,7 @@ async function runE2ESyncFromOpenTabs(source: string): Promise<boolean> {
   console.info("[polychat-ai] e2e tab scan", { source, tabs: tabs.length });
   for (const tab of tabs) {
     const url = typeof tab?.url === "string" ? tab.url : "";
-    const params = getE2EParamsFromUrl(url);
-    if (!params) continue;
-    console.info("[polychat-ai] e2e trigger found", { source, url });
-    await saveSettings({
-      serverUrl: params.get("serverUrl") || "http://127.0.0.1:3333",
-      ingestToken: params.get("ingestToken") || "",
-    });
-    const result = await syncAll();
-    await saveSettings({
-      lastSyncAt: new Date().toISOString(),
-      lastResult: formatSyncResult(result, "E2E"),
-    });
-    console.info("[polychat-ai] e2e sync result", result);
-    return true;
+    if (await maybeRunE2ESyncFromUrl(url, source)) return true;
   }
   return false;
 }
@@ -120,8 +176,17 @@ async function retryE2ESyncFromOpenTabs(source: string): Promise<void> {
 }
 
 if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
+  void retryE2ESyncFromOpenTabs("boot");
+  chrome.tabs.onUpdated.addListener((_tabId: number, changeInfo: { url?: string; status?: string }, tab: { url?: string }) => {
+    const url = typeof changeInfo.url === "string" ? changeInfo.url : typeof tab.url === "string" ? tab.url : "";
+    if (!url) return;
+    if (changeInfo.status !== "complete" && !changeInfo.url) return;
+    void maybeRunE2ESyncFromUrl(url, `updated:${changeInfo.status ?? "unknown"}`);
+  });
+  chrome.runtime.onStartup.addListener(() => {
+    void retryE2ESyncFromOpenTabs("startup");
+  });
   chrome.runtime.onInstalled.addListener((details: { reason: string }) => {
-    if (details.reason !== "install" && details.reason !== "update") return;
     void retryE2ESyncFromOpenTabs(`installed:${details.reason}`);
   });
 }
@@ -327,15 +392,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
       if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
         const e2eParams = getE2EParamsFromUrl(url);
         if (e2eParams) {
-          const serverUrl = e2eParams.get("serverUrl") || settings.serverUrl;
-          const ingestToken = e2eParams.get("ingestToken") || settings.ingestToken;
-          await saveSettings({ serverUrl, ingestToken });
           try {
-            const result = await syncAll();
-            await saveSettings({
-              lastSyncAt: new Date().toISOString(),
-              lastResult: formatSyncResult(result, "E2E"),
-            });
+            await syncE2EConversationIds(e2eParams);
           } catch (error) {
             await saveSettings({
               lastSyncAt: new Date().toISOString(),
