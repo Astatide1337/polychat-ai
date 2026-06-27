@@ -79,6 +79,7 @@ function isLoopbackHostname(hostname: string): boolean {
 function serverOriginPattern(serverUrl: string): string | null {
   const url = new URL(serverUrl);
   if (url.protocol !== "https:" || isLoopbackHostname(url.hostname)) return null;
+  if (url.hostname === "polychat.astatide.com") return null;
   return `${url.protocol}//${url.host}/*`;
 }
 
