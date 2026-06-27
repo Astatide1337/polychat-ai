@@ -65,6 +65,7 @@ describe("Production readiness", () => {
     assert.match(pkg.scripts.prepack, /npm run verify:package/);
     assert.equal(pkg.scripts["stage:binary:all"], "node scripts/stage-binary.mjs --all");
     assert.equal(pkg.scripts["verify:package:all"], "node scripts/verify-package.mjs --all");
+    assert.equal(pkg.scripts["verify:polychat-history"], "node scripts/verify-polychat-history.mjs");
     assert.equal(pkg.scripts.prepublishOnly, "npm run verify && npm run verify:package:all");
     assert.equal(pkg.scripts["pack:check"], "npm pack --dry-run");
     assert.match(extensionPkg.scripts.build, /tsc -p tsconfig\.json --noEmit/);
@@ -85,6 +86,11 @@ describe("Production readiness", () => {
     assert.match(ci, /id-token: write/);
     assert.match(ci, /npm install -g npm@11\.9\.0/);
     assert.match(ci, /npm publish --provenance --access public/);
+  });
+
+  it("verify script includes the polychat history verifier", () => {
+    const pkg = readJson("package.json");
+    assert.match(pkg.scripts.verify, /npm run verify:polychat-history/);
   });
 
   it("Claude provider no longer hard caps conversation discovery at 100", () => {

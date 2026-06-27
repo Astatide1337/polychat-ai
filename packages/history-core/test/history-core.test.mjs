@@ -165,6 +165,16 @@ test("normalizes chatgpt branch fixtures and keeps regenerated nodes", () => {
   assert.match(normalized.messages.map((message) => message.content).join("\n"), /regeneration/);
 });
 
+test("normalizes chatgpt structured content placeholders", () => {
+  const raw = fixture("chatgpt-rich-conversation.json");
+  const normalized = normalizeChatgptConversation(raw);
+  assert.equal(normalized.conversation.provider, "chatgpt");
+  assert.equal(normalized.messages.length, 2);
+  assert.match(normalized.messages[1].content, /\[Image\]/);
+  assert.match(normalized.messages[1].content, /\[File\]/);
+  assert.match(normalized.messages[1].content, /\[Artifact\]/);
+});
+
 test("normalizes claude fixture", () => {
   const raw = fixture("claude-conversation.json");
   const normalized = normalizeClaudeConversation(raw);
@@ -203,6 +213,17 @@ test("normalizes gemini body text fallback", () => {
   assert.equal(normalized.conversation.provider, "gemini");
   assert.equal(normalized.messages.length, 1);
   assert.equal(normalized.messages[0].content, "Hello from body text");
+});
+
+test("normalizes gemini wiz fallback with messy content", () => {
+  const raw = fixture("gemini-wiz-conversation.json");
+  const normalized = normalizeGeminiConversation(raw);
+  assert.equal(normalized.conversation.provider, "gemini");
+  assert.equal(normalized.messages.length, 2);
+  assert.match(normalized.messages[0].content, /TCP and UDP/);
+  assert.match(normalized.messages[1].content, /\[Image\]/);
+  assert.match(normalized.messages[1].content, /Protocol chart/);
+  assert.match(normalized.messages[1].content, /TCP is reliable/);
 });
 
 test("ignores gemini shell body text on conversation pages", () => {
