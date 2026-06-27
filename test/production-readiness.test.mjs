@@ -47,18 +47,28 @@ describe("Production readiness", () => {
     assert.ok(packageBinary < pathLookup, "package-local binary must be checked before PATH");
   });
 
+  it("MCP database uses an in-process SQLite binding", () => {
+    const src = read("apps/mcp/src/db.ts");
+    assert.match(src, /node-sqlite3-wasm/);
+    assert.doesNotMatch(src, /execFileSync\("sqlite3"/);
+  });
+
   it("package metadata supports npm release checks and binary artifacts", () => {
     const pkg = readJson("package.json");
+    const extensionPkg = readJson("apps/extension/package.json");
     assert.equal(pkg.name, "polychat-ai");
     assert.deepEqual(pkg.files.includes("bin"), true);
     assert.match(pkg.scripts.prepack, /npm run build/);
+    assert.match(pkg.scripts.prepack, /npm run build:workspaces/);
     assert.match(pkg.scripts.prepack, /npm run build:server/);
     assert.match(pkg.scripts.prepack, /npm run stage:binary/);
     assert.match(pkg.scripts.prepack, /npm run verify:package/);
     assert.equal(pkg.scripts["stage:binary:all"], "node scripts/stage-binary.mjs --all");
     assert.equal(pkg.scripts["verify:package:all"], "node scripts/verify-package.mjs --all");
-    assert.equal(pkg.scripts.prepublishOnly, "npm run verify:package:all");
+    assert.equal(pkg.scripts["verify:polychat-history"], "node scripts/verify-polychat-history.mjs");
+    assert.equal(pkg.scripts.prepublishOnly, "npm run verify && npm run verify:package:all");
     assert.equal(pkg.scripts["pack:check"], "npm pack --dry-run");
+    assert.match(extensionPkg.scripts.build, /tsc -p tsconfig\.json --noEmit/);
     assert.ok(pkg.repository?.url, "repository URL must be present");
     assert.ok(pkg.bugs?.url, "bugs URL must be present");
     assert.ok(pkg.homepage, "homepage must be present");
@@ -67,14 +77,28 @@ describe("Production readiness", () => {
   it("CI workflow runs TypeScript Rust and npm pack gates", () => {
     assert.equal(existsSync(new URL("../.github/workflows/ci.yml", import.meta.url)), true);
     const ci = read(".github/workflows/ci.yml");
-    assert.match(ci, /npm run build/);
-    assert.match(ci, /node --test/);
+    assert.match(ci, /npm run verify/);
+    assert.match(ci, /npm run verify:package:all/);
+    assert.match(ci, /npm run test:e2e/);
     assert.match(ci, /cargo test --bin polychat-server/);
     assert.match(ci, /cargo build --release/);
     assert.match(ci, /npm pack --dry-run/);
     assert.match(ci, /id-token: write/);
     assert.match(ci, /npm install -g npm@11\.9\.0/);
     assert.match(ci, /npm publish --provenance --access public/);
+  });
+
+  it("verify script includes the polychat history verifier", () => {
+    const pkg = readJson("package.json");
+    assert.match(pkg.scripts.verify, /npm run verify:polychat-history/);
+  });
+
+  it("Claude provider no longer hard caps conversation discovery at 100", () => {
+    const rustSrc = read("rust/server/src/providers/claude.rs");
+    const webSrc = read("apps/extension/src/providers/claude.ts");
+    assert.match(rustSrc, /fetch_claude_conversations/);
+    assert.doesNotMatch(rustSrc, /limit=100/);
+    assert.doesNotMatch(webSrc, /limit=100/);
   });
 
   it("README documents quickstart security providers and OpenAI usage", () => {
@@ -86,5 +110,12 @@ describe("Production readiness", () => {
     assert.match(src, /Supported providers/);
     assert.match(src, /Security/);
     assert.match(src, /OpenAI-compatible/);
+  });
+
+  it("generated WebUI evidence outputs stay ignored and checkout paths stay out of tests", () => {
+    const gitignore = read(".gitignore");
+    const tracker = read("rust/server/src/routes/conversation_tracker.rs");
+    assert.match(gitignore, /docs\/webui-assets\/webui-live-\*/);
+    assert.doesNotMatch(tracker, /\/home\/sohamb\/Desktop\/polychat/);
   });
 });

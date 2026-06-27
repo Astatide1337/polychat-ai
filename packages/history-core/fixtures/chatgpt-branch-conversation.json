@@ -1,0 +1,46 @@
+{
+  "id": "chatgpt-conv-branch",
+  "title": "Mars follow-up branches",
+  "create_time": "2026-06-24T15:00:00.000Z",
+  "update_time": "2026-06-24T15:05:00.000Z",
+  "current_node": "assistant-1",
+  "model": "gpt-5-mini",
+  "url": "https://chatgpt.com/c/chatgpt-conv-branch",
+  "mapping": {
+    "root": {
+      "id": "root",
+      "parent": null,
+      "message": null
+    },
+    "user-1": {
+      "id": "user-1",
+      "parent": "root",
+      "message": {
+        "id": "msg-user-1",
+        "author": { "role": "user" },
+        "content": { "parts": ["Explain the atmosphere on Mars."] },
+        "create_time": "2026-06-24T15:00:01.000Z"
+      }
+    },
+    "assistant-1": {
+      "id": "assistant-1",
+      "parent": "user-1",
+      "message": {
+        "id": "msg-assistant-1",
+        "author": { "role": "assistant" },
+        "content": { "parts": ["Mars has a thin atmosphere mostly made of carbon dioxide."] },
+        "create_time": "2026-06-24T15:00:05.000Z"
+      }
+    },
+    "assistant-2": {
+      "id": "assistant-2",
+      "parent": "user-1",
+      "message": {
+        "id": "msg-assistant-2",
+        "author": { "role": "assistant" },
+        "content": { "parts": ["A regeneration on the same prompt may answer differently."] },
+        "create_time": "2026-06-24T15:00:06.000Z"
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "cid": "gemini-conv-1",
+  "title": "French Revolution summary",
+  "model": "gemini-2.5-flash",
+  "created_at": "2026-06-24T14:00:00.000Z",
+  "updated_at": "2026-06-24T14:05:00.000Z",
+  "messages": [
+    {
+      "message_id": "gemini-msg-1",
+      "role": "user",
+      "content": "Summarize the key events of the French Revolution in under 200 words.",
+      "created_at": "2026-06-24T14:00:01.000Z"
+    },
+    {
+      "message_id": "gemini-msg-2",
+      "role": "assistant",
+      "content": "The French Revolution began in 1789 with the Estates-General...",
+      "parent_id": "gemini-msg-1",
+      "created_at": "2026-06-24T14:00:06.000Z"
+    }
+  ]
+}

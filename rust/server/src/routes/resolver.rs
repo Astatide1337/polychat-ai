@@ -3,7 +3,10 @@ use crate::providers::ModelInfo;
 
 #[allow(dead_code)]
 fn find_matching_model(model_id: &str, models: &[ModelInfo]) -> Option<ModelInfo> {
-    models.iter().find(|m| model_matches(model_id, &m.id)).cloned()
+    models
+        .iter()
+        .find(|m| model_matches(model_id, &m.id))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -32,7 +35,10 @@ mod tests {
     #[test]
     fn finds_alias_model_match() {
         let models = vec![model("gpt-5-5", "chatgpt"), model("k2", "kimi")];
-        assert_eq!(find_matching_model("gpt-5-mini", &models).unwrap().id, "gpt-5-5");
+        assert_eq!(
+            find_matching_model("gpt-5-mini", &models).unwrap().id,
+            "gpt-5-5"
+        );
         assert_eq!(find_matching_model("kimi-k2.6", &models).unwrap().id, "k2");
     }
 

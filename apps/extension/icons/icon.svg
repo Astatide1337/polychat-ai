@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="18" x2="110" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A" />
+      <stop offset="1" stop-color="#101C33" />
+    </linearGradient>
+    <linearGradient id="accent" x1="26" y1="30" x2="102" y2="98" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5EEAD4" />
+      <stop offset="1" stop-color="#22D3EE" />
+    </linearGradient>
+    <linearGradient id="accent2" x1="32" y1="62" x2="96" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A7F3D0" />
+      <stop offset="1" stop-color="#67E8F9" />
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="28" fill="url(#bg)" />
+  <rect x="14" y="14" width="100" height="100" rx="24" stroke="rgba(255,255,255,0.08)" stroke-width="1.5" />
+
+  <path
+    d="M30 40C30 33.925 34.925 29 41 29H73C79.075 29 84 33.925 84 40V57C84 63.075 79.075 68 73 68H56L44 78V68H41C34.925 68 30 63.075 30 57V40Z"
+    fill="#111B31"
+    stroke="url(#accent)"
+    stroke-width="3"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M52 69C52 62.925 56.925 58 63 58H91C97.075 58 102 62.925 102 69V82C102 88.075 97.075 93 91 93H77L68 101V93H63C56.925 93 52 88.075 52 82V69Z"
+    fill="#14233F"
+    stroke="url(#accent2)"
+    stroke-width="3"
+    stroke-linejoin="round"
+  />
+
+  <circle cx="44" cy="49" r="3.5" fill="#E2E8F0" />
+  <circle cx="56" cy="49" r="3.5" fill="#E2E8F0" />
+  <circle cx="68" cy="49" r="3.5" fill="#E2E8F0" />
+
+  <circle cx="64" cy="77" r="3.2" fill="#D1FAE5" />
+  <circle cx="76" cy="77" r="3.2" fill="#D1FAE5" />
+  <circle cx="88" cy="77" r="3.2" fill="#D1FAE5" />
+
+  <path d="M77 94C79.25 90 84.4 87 90 87" stroke="url(#accent2)" stroke-width="3" stroke-linecap="round" />
+  <circle cx="93" cy="87" r="3.5" fill="#67E8F9" />
+
+  <path d="M47 24V18" stroke="#67E8F9" stroke-width="4" stroke-linecap="round" />
+  <path d="M81 24V18" stroke="#5EEAD4" stroke-width="4" stroke-linecap="round" />
+</svg>

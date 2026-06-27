@@ -1,6 +1,6 @@
 use crate::mcp::types::{McpCallResult, McpToolDescriptor};
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Value, json};
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Value};
 use std::time::Duration;
 
 const MCP_HTTP_TIMEOUT_SECS: u64 = 30;

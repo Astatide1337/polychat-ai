@@ -4,9 +4,9 @@
 //! Keccak-256 implementation, and builds the `x-ds-pow-response` header.
 
 use anyhow::{bail, Context};
-use serde::{Deserialize, Serialize};
 use base64::Engine;
 use hex;
+use serde::{Deserialize, Serialize};
 
 use super::keccak::KeccakSponge;
 
@@ -22,9 +22,9 @@ pub struct DeepSeekChallenge {
     pub signature: String,
     pub difficulty: usize,
     pub expire_at: u64,
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub expire_after: u64,
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub target_path: String,
 }
 
@@ -76,8 +76,8 @@ pub async fn fetch_challenge(
         .and_then(|b| b.get("challenge"))
         .context("DeepSeek PoW challenge response missing challenge data")?;
 
-    let chal: DeepSeekChallenge = serde_json::from_value(challenge.clone())
-        .context("parsing DeepSeek PoW challenge")?;
+    let chal: DeepSeekChallenge =
+        serde_json::from_value(challenge.clone()).context("parsing DeepSeek PoW challenge")?;
     Ok(chal)
 }
 

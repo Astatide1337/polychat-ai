@@ -4,21 +4,25 @@
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, COOKIE, USER_AGENT, ACCEPT, REFERER, ORIGIN, CONTENT_TYPE};
-use serde_json::Value;
-use sha3::{Digest, Sha3_512};
-use uuid::Uuid;
 use base64::Engine;
 use hex;
-use tokio::sync::oneshot;
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
+    USER_AGENT,
+};
+use serde_json::Value;
+use sha3::{Digest, Sha3_512};
 use std::time::Duration;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
+use super::ReceiverStream;
+use super::{collect_set_cookies, merge_set_cookies};
 use crate::providers::*;
 use crate::session::load_session;
-use super::ReceiverStream;
-use super::{merge_set_cookies, collect_set_cookies};
 
-const CHATGPT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0";
+const CHATGPT_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0";
 const CHATGPT_HISTORY_REPLAY_CHAR_BUDGET: usize = 12_000;
 const CHATGPT_HISTORY_REPLAY_MAX_MESSAGES: usize = 12;
 const CHATGPT_HISTORY_MESSAGE_CHAR_LIMIT: usize = 2_000;
@@ -49,7 +53,11 @@ fn merge_response_cookies(cookie_header: &mut String, response: &reqwest::Respon
 }
 
 fn update_access_token(access_token: &mut Option<String>, payload: &Value) {
-    if let Some(token) = payload.get("accessToken").and_then(|v| v.as_str()).map(str::trim) {
+    if let Some(token) = payload
+        .get("accessToken")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+    {
         if !token.is_empty() {
             *access_token = Some(token.to_string());
         }
@@ -70,7 +78,8 @@ fn extract_chatgpt_cookies(session: &Value) -> Option<String> {
     let cookies = session.get("cookies")?.as_array()?;
 
     // Priority 1: session tokens and essential auth cookies (avoid HTTP 431)
-    let mut essential_pairs: Vec<String> = cookies.iter()
+    let mut essential_pairs: Vec<String> = cookies
+        .iter()
         .filter_map(|c| {
             let domain = c.get("domain").and_then(|d| d.as_str()).unwrap_or("");
             let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -85,10 +94,10 @@ fn extract_chatgpt_cookies(session: &Value) -> Option<String> {
                 || name.contains("oai-client-auth")
                 || name == "__cf_bm"
                 || name == "__cflb"
-            || name == "cf_clearance"
-            || name == "oai-sc"
-            || name == "_puid"
-            || name == "oai-did";
+                || name == "cf_clearance"
+                || name == "oai-sc"
+                || name == "_puid"
+                || name == "oai-did";
             if essential {
                 Some(format!("{}={}", name, value))
             } else {
@@ -97,23 +106,39 @@ fn extract_chatgpt_cookies(session: &Value) -> Option<String> {
         })
         .collect();
 
-    if essential_pairs.is_empty() { return None; }
+    if essential_pairs.is_empty() {
+        return None;
+    }
 
     // Sort: session/auth tokens first so they fit within the 8KB cap
     essential_pairs.sort_by_key(|p| {
         let name = p.split('=').next().unwrap_or("");
-        if name.contains("session-token") || name.contains("oai-is") || name.contains("oai-client-auth") { 0usize }
-        else { 1 }
+        if name.contains("session-token")
+            || name.contains("oai-is")
+            || name.contains("oai-client-auth")
+        {
+            0usize
+        } else {
+            1
+        }
     });
 
     // Build cookie header, capping at 8KB
     let mut result = String::new();
     for pair in &essential_pairs {
-        if result.len() + pair.len() + 2 > 8000 { break; }
-        if !result.is_empty() { result.push_str("; "); }
+        if result.len() + pair.len() + 2 > 8000 {
+            break;
+        }
+        if !result.is_empty() {
+            result.push_str("; ");
+        }
         result.push_str(pair);
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Decode the `exp` claim from a JWT access token.
@@ -155,7 +180,10 @@ fn build_chatgpt_base_headers(auth: &ChatGptAuth) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", auth.access_token)));
+    headers.insert(
+        AUTHORIZATION,
+        header_value(&format!("Bearer {}", auth.access_token)),
+    );
     insert_cookie(&mut headers, &auth.cookie_header);
     headers.insert(ORIGIN, HeaderValue::from_static("https://chatgpt.com"));
     headers.insert(REFERER, HeaderValue::from_static("https://chatgpt.com/"));
@@ -170,7 +198,8 @@ fn build_chatgpt_base_headers(auth: &ChatGptAuth) -> HeaderMap {
 fn generate_proof_token(seed: &str, difficulty: &str, user_agent: &str) -> Option<String> {
     let screens = [3008, 4010, 6000];
     let dprs = [1, 2, 4];
-    let screen = screens[rand::random::<usize>() % screens.len()] * dprs[rand::random::<usize>() % dprs.len()];
+    let screen = screens[rand::random::<usize>() % screens.len()]
+        * dprs[rand::random::<usize>() % dprs.len()];
 
     let now = chrono::Utc::now();
     let parse_time = now.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
@@ -184,7 +213,9 @@ fn generate_proof_token(seed: &str, difficulty: &str, user_agent: &str) -> Optio
             Value::Null,
             Value::from(i),
             Value::from(user_agent.to_string()),
-            Value::from("https://tcr9i.chat.openai.com/v2/35536E1E-65B4-4D96-9D97-6ADB7EFF8147/api.js"),
+            Value::from(
+                "https://tcr9i.chat.openai.com/v2/35536E1E-65B4-4D96-9D97-6ADB7EFF8147/api.js",
+            ),
             Value::from("dpl=1440a687921de39ff5ee56b92807faaadce73f13"),
             Value::from("en"),
             Value::from("en-US"),
@@ -209,7 +240,10 @@ fn generate_proof_token(seed: &str, difficulty: &str, user_agent: &str) -> Optio
 
     let fallback_json = serde_json::to_string(&format!("\"{}\"", seed)).ok()?;
     let fallback_base = base64::engine::general_purpose::STANDARD.encode(fallback_json.as_bytes());
-    Some(format!("gAAAAABwQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D{}", fallback_base))
+    Some(format!(
+        "gAAAAABwQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D{}",
+        fallback_base
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -224,22 +258,24 @@ impl ChatGptProvider {
     pub fn new() -> Self {
         ChatGptProvider {
             client: reqwest::Client::builder()
-                            .connect_timeout(std::time::Duration::from_secs(10))
-                            .build()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
                 .expect("building reqwest client"),
         }
     }
 
     async fn get_auth(&self) -> anyhow::Result<ChatGptAuth> {
         let session = load_session("chatgpt")?;
-        let mut cookie_header = extract_chatgpt_cookies(&session)
-            .context("ChatGPT session has no cookies")?;
+        let mut cookie_header =
+            extract_chatgpt_cookies(&session).context("ChatGPT session has no cookies")?;
         let mut access_token = extract_access_token_from_session(&session);
 
         {
-            let headers = build_session_headers(&cookie_header, "application/json, text/plain, */*");
+            let headers =
+                build_session_headers(&cookie_header, "application/json, text/plain, */*");
 
-            let res = self.client
+            let res = self
+                .client
                 .get("https://chatgpt.com/api/auth/session")
                 .headers(headers)
                 .timeout(std::time::Duration::from_secs(15))
@@ -261,7 +297,8 @@ impl ChatGptProvider {
         }
 
         let access_token = access_token.context(
-            "ChatGPT session has no access token. Run `polychat login chatgpt` to create one.")?;
+            "ChatGPT session has no access token. Run `polychat login chatgpt` to create one.",
+        )?;
 
         // Validate the access token is not expired.
         // JWT payload (base64): {"exp": <unix_seconds>, ...}
@@ -278,7 +315,10 @@ impl ChatGptProvider {
             }
         }
 
-        Ok(ChatGptAuth { access_token, cookie_header })
+        Ok(ChatGptAuth {
+            access_token,
+            cookie_header,
+        })
     }
 
     async fn get_completion_headers(&self, auth: &ChatGptAuth) -> anyhow::Result<HeaderMap> {
@@ -288,7 +328,8 @@ impl ChatGptProvider {
 
         let csrf_headers = build_session_headers(&cookie_jar, "application/json");
 
-        if let Ok(res) = self.client
+        if let Ok(res) = self
+            .client
             .get("https://chatgpt.com/api/auth/csrf")
             .headers(csrf_headers)
             .timeout(std::time::Duration::from_secs(15))
@@ -313,15 +354,19 @@ impl ChatGptProvider {
         insert_cookie(&mut headers, &cookie_jar);
 
         if !req.token.is_empty() {
-            headers.insert("openai-sentinel-chat-requirements-token",
-                header_value(&req.token));
+            headers.insert(
+                "openai-sentinel-chat-requirements-token",
+                header_value(&req.token),
+            );
         }
         if req.pow_required {
             if let (Some(seed), Some(difficulty)) = (&req.pow_seed, &req.pow_difficulty) {
-                let ua = headers.get(USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+                let ua = headers
+                    .get(USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
                 if let Some(proof) = generate_proof_token(seed, difficulty, ua) {
-                    headers.insert("openai-sentinel-proof-token",
-                        header_value(&proof));
+                    headers.insert("openai-sentinel-proof-token", header_value(&proof));
                 }
             }
         }
@@ -335,8 +380,12 @@ impl ChatGptProvider {
         conversation_id: &str,
     ) -> anyhow::Result<Option<String>> {
         let headers = build_chatgpt_base_headers(auth);
-        let res = self.client
-            .get(format!("https://chatgpt.com/backend-api/conversation/{}", conversation_id))
+        let res = self
+            .client
+            .get(format!(
+                "https://chatgpt.com/backend-api/conversation/{}",
+                conversation_id
+            ))
             .headers(headers)
             .timeout(std::time::Duration::from_secs(15))
             .send()
@@ -347,14 +396,21 @@ impl ChatGptProvider {
             bail!("ChatGPT conversation load request failed: {}", res.status());
         }
 
-        let payload: Value = res.json().await.context("decoding ChatGPT conversation detail")?;
+        let payload: Value = res
+            .json()
+            .await
+            .context("decoding ChatGPT conversation detail")?;
         Ok(payload
             .get("current_node")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()))
     }
 
-    async fn get_chat_requirements(&self, auth: &ChatGptAuth, headers: &HeaderMap) -> (ChatRequirementsResult, Vec<String>) {
+    async fn get_chat_requirements(
+        &self,
+        auth: &ChatGptAuth,
+        headers: &HeaderMap,
+    ) -> (ChatRequirementsResult, Vec<String>) {
         let token_prefix = &auth.access_token[..auth.access_token.len().min(32)];
         let fallback_token = token_prefix.to_string();
         let empty_cookies: Vec<String> = vec![];
@@ -362,7 +418,8 @@ impl ChatGptProvider {
         let mut req_headers = headers.clone();
         req_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        let res = match self.client
+        let res = match self
+            .client
             .post("https://chatgpt.com/backend-api/sentinel/chat-requirements")
             .headers(req_headers)
             .json(&serde_json::json!({ "p": token_prefix }))
@@ -371,34 +428,71 @@ impl ChatGptProvider {
             .await
         {
             Ok(r) => r,
-            Err(_) => return (ChatRequirementsResult {
-                token: fallback_token, pow_required: false, pow_seed: None, pow_difficulty: None,
-            }, empty_cookies),
+            Err(_) => {
+                return (
+                    ChatRequirementsResult {
+                        token: fallback_token,
+                        pow_required: false,
+                        pow_seed: None,
+                        pow_difficulty: None,
+                    },
+                    empty_cookies,
+                )
+            }
         };
 
         if !res.status().is_success() {
-            return (ChatRequirementsResult {
-                token: fallback_token, pow_required: false, pow_seed: None, pow_difficulty: None,
-            }, empty_cookies);
+            return (
+                ChatRequirementsResult {
+                    token: fallback_token,
+                    pow_required: false,
+                    pow_seed: None,
+                    pow_difficulty: None,
+                },
+                empty_cookies,
+            );
         }
 
         let fresh = collect_set_cookies(&res);
 
         match res.json::<Value>().await {
             Ok(json) => {
-                let token = json.get("token").and_then(|v| v.as_str())
-                    .unwrap_or(&fallback_token).to_string();
+                let token = json
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&fallback_token)
+                    .to_string();
                 let pow = json.get("proofofwork");
-                (ChatRequirementsResult {
-                    token,
-                    pow_required: pow.as_ref().and_then(|p| p.get("required")).and_then(|v| v.as_bool()).unwrap_or(false),
-                    pow_seed: pow.as_ref().and_then(|p| p.get("seed")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    pow_difficulty: pow.and_then(|p| p.get("difficulty")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                }, fresh)
+                (
+                    ChatRequirementsResult {
+                        token,
+                        pow_required: pow
+                            .as_ref()
+                            .and_then(|p| p.get("required"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        pow_seed: pow
+                            .as_ref()
+                            .and_then(|p| p.get("seed"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        pow_difficulty: pow
+                            .and_then(|p| p.get("difficulty"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    },
+                    fresh,
+                )
             }
-            Err(_) => (ChatRequirementsResult {
-                token: fallback_token, pow_required: false, pow_seed: None, pow_difficulty: None,
-            }, empty_cookies),
+            Err(_) => (
+                ChatRequirementsResult {
+                    token: fallback_token,
+                    pow_required: false,
+                    pow_seed: None,
+                    pow_difficulty: None,
+                },
+                empty_cookies,
+            ),
         }
     }
 }
@@ -415,14 +509,20 @@ struct ChatRequirementsResult {
 // ---------------------------------------------------------------------------
 
 fn truncate_replayed_content(text: &str) -> String {
-    let mut truncated = text.chars().take(CHATGPT_HISTORY_MESSAGE_CHAR_LIMIT).collect::<String>();
+    let mut truncated = text
+        .chars()
+        .take(CHATGPT_HISTORY_MESSAGE_CHAR_LIMIT)
+        .collect::<String>();
     if text.chars().count() > CHATGPT_HISTORY_MESSAGE_CHAR_LIMIT {
         truncated.push_str("\n...[truncated]");
     }
     truncated
 }
 
-fn compact_history_for_payload(messages: &[ChatMessage], conversation_id: Option<&str>) -> Vec<ChatMessage> {
+fn compact_history_for_payload(
+    messages: &[ChatMessage],
+    conversation_id: Option<&str>,
+) -> Vec<ChatMessage> {
     if conversation_id.is_some() || messages.len() <= 1 {
         return Vec::new();
     }
@@ -502,7 +602,8 @@ fn build_payload(
     let latest = messages.last();
 
     let system_text = if !history.is_empty() {
-        history.iter()
+        history
+            .iter()
             .map(|m| format!("{}: {}", m.role.to_uppercase(), m.content))
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -552,9 +653,15 @@ fn build_payload(
 fn build_conversation_request_body(payload: &Value, temporary: bool) -> Value {
     let mut body = payload.as_object().cloned().unwrap_or_default();
     body.insert("action".into(), Value::from("next"));
-    body.insert("history_and_training_disabled".into(), Value::from(temporary));
+    body.insert(
+        "history_and_training_disabled".into(),
+        Value::from(temporary),
+    );
     body.insert("suggestions".into(), Value::Array(vec![]));
-    body.insert("websocket_request_id".into(), Value::from(Uuid::new_v4().to_string()));
+    body.insert(
+        "websocket_request_id".into(),
+        Value::from(Uuid::new_v4().to_string()),
+    );
     Value::Object(body)
 }
 
@@ -615,8 +722,12 @@ fn split_chatgpt_delta(delta: &str) -> Vec<String> {
 
 #[async_trait]
 impl Provider for ChatGptProvider {
-    fn id(&self) -> &'static str { "chatgpt" }
-    fn name(&self) -> &'static str { "ChatGPT" }
+    fn id(&self) -> &'static str {
+        "chatgpt"
+    }
+    fn name(&self) -> &'static str {
+        "ChatGPT"
+    }
 
     async fn validate_session(&self) -> bool {
         self.get_auth().await.is_ok()
@@ -626,7 +737,8 @@ impl Provider for ChatGptProvider {
         let auth = self.get_auth().await?;
         let headers = build_chatgpt_base_headers(&auth);
 
-        let res = self.client
+        let res = self
+            .client
             .get("https://chatgpt.com/backend-api/models?history_and_training_disabled=false")
             .headers(headers)
             .timeout(std::time::Duration::from_secs(15))
@@ -646,7 +758,8 @@ impl Provider for ChatGptProvider {
         let auth = self.get_auth().await?;
         let headers = build_chatgpt_base_headers(&auth);
 
-        let res = self.client
+        let res = self
+            .client
             .get("https://chatgpt.com/backend-api/conversations?offset=0&limit=50&order=updated")
             .headers(headers)
             .timeout(std::time::Duration::from_secs(15))
@@ -659,23 +772,38 @@ impl Provider for ChatGptProvider {
         }
 
         let payload: Value = res.json().await?;
-        let items = payload.get("items").or_else(|| payload.get("conversations"))
+        let items = payload
+            .get("items")
+            .or_else(|| payload.get("conversations"))
             .and_then(|v| v.as_array());
 
         let mut convos = Vec::new();
         if let Some(items) = items {
             for item in items {
-                let id = item.get("id").or_else(|| item.get("conversation_id"))
-                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if id.is_empty() { continue; }
-                let title = item.get("title").and_then(|v| v.as_str())
-                    .map(|t| t.trim()).filter(|t| !t.is_empty())
-                    .unwrap_or("Untitled conversation").to_string();
+                let id = item
+                    .get("id")
+                    .or_else(|| item.get("conversation_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let title = item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("Untitled conversation")
+                    .to_string();
                 let updated_at = item.get("update_time").and_then(|v| {
-                    v.as_str().map(|s| s.to_string()).or_else(|| v.as_i64().map(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.to_rfc3339()).unwrap_or_default()
-                    }))
+                    v.as_str().map(|s| s.to_string()).or_else(|| {
+                        v.as_i64().map(|ts| {
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_default()
+                        })
+                    })
                 });
                 convos.push(ProviderConversation {
                     id,
@@ -706,33 +834,36 @@ impl Provider for ChatGptProvider {
         })
     }
 
-    fn tool_call_strategy(&self) -> ToolCallStrategy { ToolCallStrategy::Emulated }
+    fn tool_call_strategy(&self) -> ToolCallStrategy {
+        ToolCallStrategy::Emulated
+    }
 
-async fn send_message(
-    &self,
-    messages: &[ChatMessage],
-    model: &str,
-    options: &ChatOptions,
-    conversation_id: Option<&str>,
-) -> anyhow::Result<ProviderResponse> {
-    let auth = self.get_auth().await?;
-    let headers = self.get_completion_headers(&auth).await?;
-    let parent_message_id = if let Some(conversation_id) = conversation_id {
-        self.fetch_current_node(&auth, conversation_id).await?
-    } else {
-        None
-    };
-    let payload = build_payload(
-        messages,
-        model,
-        conversation_id,
-        parent_message_id.as_deref(),
-        reasoning_effort_for_request(options),
-    );
+    async fn send_message(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        options: &ChatOptions,
+        conversation_id: Option<&str>,
+    ) -> anyhow::Result<ProviderResponse> {
+        let auth = self.get_auth().await?;
+        let headers = self.get_completion_headers(&auth).await?;
+        let parent_message_id = if let Some(conversation_id) = conversation_id {
+            self.fetch_current_node(&auth, conversation_id).await?
+        } else {
+            None
+        };
+        let payload = build_payload(
+            messages,
+            model,
+            conversation_id,
+            parent_message_id.as_deref(),
+            reasoning_effort_for_request(options),
+        );
 
-    let body = build_conversation_request_body(&payload, options.temporary);
+        let body = build_conversation_request_body(&payload, options.temporary);
 
-        let res = self.client
+        let res = self
+            .client
             .post("https://chatgpt.com/backend-api/f/conversation")
             .headers(headers)
             .json(&body)
@@ -749,8 +880,10 @@ async fn send_message(
         let captured_id = if conversation_id.is_none() {
             let (tx, mut rx) = oneshot::channel::<String>();
             let stream = stream_chatgpt_chunks(res, Some(tx));
-            let cid = tokio::time::timeout(Duration::from_secs(2), &mut rx).await
-                .ok().and_then(|r| r.ok());
+            let cid = tokio::time::timeout(Duration::from_secs(2), &mut rx)
+                .await
+                .ok()
+                .and_then(|r| r.ok());
             std::mem::drop(rx);
             (stream, cid)
         } else {
@@ -759,7 +892,9 @@ async fn send_message(
 
         Ok(ProviderResponse {
             stream: captured_id.0,
-            conversation_id: captured_id.1.or_else(|| conversation_id.map(|s| s.to_string())),
+            conversation_id: captured_id
+                .1
+                .or_else(|| conversation_id.map(|s| s.to_string())),
         })
     }
 }
@@ -768,7 +903,10 @@ async fn send_message(
 // ChatGPT SSE stream parser
 // ---------------------------------------------------------------------------
 
-fn stream_chatgpt_chunks(response: reqwest::Response, conv_tx: Option<oneshot::Sender<String>>) -> ChunkStream {
+fn stream_chatgpt_chunks(
+    response: reqwest::Response,
+    conv_tx: Option<oneshot::Sender<String>>,
+) -> ChunkStream {
     use crate::providers::sse::{extract_frames, FrameMode, ParsedFrame};
     use tokio::sync::mpsc;
 
@@ -799,7 +937,9 @@ fn stream_chatgpt_chunks(response: reqwest::Response, conv_tx: Option<oneshot::S
                         if let Ok(json) = serde_json::from_str::<Value>(&data) {
                             // Capture conversation_id from the first SSE event (one-shot)
                             if let Some(tx_ref) = conv_tx.take() {
-                                if let Some(cid) = json.get("conversation_id").and_then(|v| v.as_str()) {
+                                if let Some(cid) =
+                                    json.get("conversation_id").and_then(|v| v.as_str())
+                                {
                                     let _ = tx_ref.send(cid.to_string());
                                 }
                             }
@@ -825,8 +965,12 @@ fn stream_chatgpt_chunks(response: reqwest::Response, conv_tx: Option<oneshot::S
                                     if !delta.is_empty() {
                                         for chunk in split_chatgpt_delta(&delta) {
                                             if !chunk.is_empty() {
-                                                let _ = tx.send(Ok(ChatChunk::Content(chunk))).await;
-                                                tokio::time::sleep(Duration::from_millis(CHATGPT_STREAM_PACE_MS)).await;
+                                                let _ =
+                                                    tx.send(Ok(ChatChunk::Content(chunk))).await;
+                                                tokio::time::sleep(Duration::from_millis(
+                                                    CHATGPT_STREAM_PACE_MS,
+                                                ))
+                                                .await;
                                             }
                                         }
                                         sent_length = full_text.len();
@@ -859,9 +1003,7 @@ fn extract_chatgpt_reasoning(data: &Value) -> Option<String> {
                 }
                 // Check for reasoning as array of parts
                 if let Some(parts) = reasoning.get("parts").and_then(|v| v.as_array()) {
-                    let text: String = parts.iter()
-                        .filter_map(|p| p.as_str())
-                        .collect();
+                    let text: String = parts.iter().filter_map(|p| p.as_str()).collect();
                     if !text.is_empty() {
                         return Some(text);
                     }
@@ -895,9 +1037,7 @@ fn extract_chatgpt_latest_text(data: &Value) -> Option<String> {
                 if let Some(author) = message.get("author") {
                     if author.get("role").and_then(|v| v.as_str()) == Some("assistant") {
                         if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
-                            let text: String = parts.iter()
-                                .filter_map(|p| p.as_str())
-                                .collect();
+                            let text: String = parts.iter().filter_map(|p| p.as_str()).collect();
                             if !text.is_empty() {
                                 return Some(text);
                             }
@@ -944,10 +1084,9 @@ fn extract_chatgpt_tool_call(data: &Value) -> Option<(String, String)> {
 
     // Try metadata.tool_call (alternative format)
     if let Some(tc) = metadata.get("tool_call") {
-        if let (Some(name), Some(args_val)) = (
-            tc.get("name").and_then(|v| v.as_str()),
-            tc.get("arguments"),
-        ) {
+        if let (Some(name), Some(args_val)) =
+            (tc.get("name").and_then(|v| v.as_str()), tc.get("arguments"))
+        {
             let args_str = if let Some(s) = args_val.as_str() {
                 s.to_string()
             } else {
@@ -998,8 +1137,14 @@ mod tests {
             None,
         );
 
-        assert_eq!(payload.get("conversation_id").and_then(|v| v.as_str()), Some("conv-123"));
-        assert_eq!(payload.get("parent_message_id").and_then(|v| v.as_str()), Some("parent-456"));
+        assert_eq!(
+            payload.get("conversation_id").and_then(|v| v.as_str()),
+            Some("conv-123")
+        );
+        assert_eq!(
+            payload.get("parent_message_id").and_then(|v| v.as_str()),
+            Some("parent-456")
+        );
     }
 
     #[test]
@@ -1056,7 +1201,11 @@ mod tests {
         let mut messages = Vec::new();
         for idx in 0..20 {
             messages.push(ChatMessage {
-                role: if idx % 2 == 0 { "user".into() } else { "assistant".into() },
+                role: if idx % 2 == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
                 content: format!("history-{idx}-{}", "x".repeat(2_500)),
                 tool_call_id: None,
             });
@@ -1089,7 +1238,10 @@ mod tests {
             Some("high"),
         );
 
-        assert_eq!(payload.get("reasoning_effort").and_then(|v| v.as_str()), Some("high"));
+        assert_eq!(
+            payload.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("high")
+        );
     }
 
     #[test]
@@ -1126,12 +1278,21 @@ mod tests {
         let body = build_conversation_request_body(&payload, true);
 
         assert_eq!(
-            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
+            body.get("history_and_training_disabled")
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
         assert!(body.get("conversation_mode").is_none());
-        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
-        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            body.get("suggestions")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(body
+            .get("websocket_request_id")
+            .and_then(|v| v.as_str())
+            .is_some());
         assert!(body.get("force_paragen").is_none());
         assert!(body.get("force_rate_limit").is_none());
     }
@@ -1153,12 +1314,21 @@ mod tests {
         let body = build_conversation_request_body(&payload, false);
 
         assert_eq!(
-            body.get("history_and_training_disabled").and_then(|v| v.as_bool()),
+            body.get("history_and_training_disabled")
+                .and_then(|v| v.as_bool()),
             Some(false)
         );
         assert!(body.get("conversation_mode").is_none());
-        assert_eq!(body.get("suggestions").and_then(|v| v.as_array()).map(Vec::len), Some(0));
-        assert!(body.get("websocket_request_id").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            body.get("suggestions")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(body
+            .get("websocket_request_id")
+            .and_then(|v| v.as_str())
+            .is_some());
         assert!(body.get("force_paragen").is_none());
         assert!(body.get("force_rate_limit").is_none());
     }
@@ -1172,9 +1342,18 @@ mod tests {
         }))
         .expect("debug metadata");
 
-        assert_eq!(debug.get("is_temporary_chat").and_then(Value::as_bool), Some(true));
-        assert_eq!(debug.get("is_do_not_remember").and_then(Value::as_bool), Some(true));
-        assert_eq!(debug.get("memory_scope").and_then(Value::as_str), Some("global_disabled"));
+        assert_eq!(
+            debug.get("is_temporary_chat").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            debug.get("is_do_not_remember").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            debug.get("memory_scope").and_then(Value::as_str),
+            Some("global_disabled")
+        );
     }
 
     #[test]
@@ -1219,9 +1398,11 @@ mod tests {
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
         assert_eq!(chunks.concat(), "Ariel has fault canyons and resurfaced plains that suggest internal activity long after its formation.");
-        assert!(chunks.iter().take(chunks.len().saturating_sub(1)).all(|chunk| chunk.len() <= 36));
+        assert!(chunks
+            .iter()
+            .take(chunks.len().saturating_sub(1))
+            .all(|chunk| chunk.len() <= 36));
     }
-
 }
 // ---------------------------------------------------------------------------
 // Model normalization
@@ -1233,12 +1414,23 @@ fn normalize_chatgpt_models(payload: &Value) -> Vec<ModelInfo> {
 
     if let Some(items) = payload.get("models").and_then(|m| m.as_array()) {
         for item in items {
-            let id = item.get("slug").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if id.is_empty() || seen.contains(id) { continue; }
+            let id = item
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if id.is_empty() || seen.contains(id) {
+                continue;
+            }
             seen.insert(id.to_string());
-            let name = item.get("title").or_else(|| item.get("name"))
-                .and_then(|v| v.as_str()).map(|s| s.trim())
-                .filter(|s| !s.is_empty()).unwrap_or(id).to_string();
+            let name = item
+                .get("title")
+                .or_else(|| item.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id)
+                .to_string();
             models.push(ModelInfo {
                 id: id.to_string(),
                 name,

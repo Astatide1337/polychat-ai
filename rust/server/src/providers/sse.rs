@@ -8,8 +8,8 @@
 //! The `stream_sse_response` and `stream_line_response` functions handle
 //! the async boilerplate (channel creation, tokio spawn, buffering).
 
-use tokio::sync::mpsc;
 use crate::providers::{ChatChunk, ChunkStream, ReceiverStream};
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Frame parser (pure, testable)
@@ -100,10 +100,7 @@ pub enum HandlerAction {
 /// Providers that need side channels (e.g. oneshot for conversation_id capture)
 /// should wrap them in `std::sync::Mutex<Option<oneshot::Sender>>` inside
 /// their handler closure.
-pub fn stream_sse_response<F>(
-    response: reqwest::Response,
-    handler: F,
-) -> ChunkStream
+pub fn stream_sse_response<F>(response: reqwest::Response, handler: F) -> ChunkStream
 where
     F: Fn(&str) -> HandlerAction + Send + 'static,
 {
@@ -111,21 +108,14 @@ where
 }
 
 /// Stream a line-delimited HTTP response, calling a handler for each line.
-pub fn stream_line_response<F>(
-    response: reqwest::Response,
-    handler: F,
-) -> ChunkStream
+pub fn stream_line_response<F>(response: reqwest::Response, handler: F) -> ChunkStream
 where
     F: Fn(&str) -> HandlerAction + Send + 'static,
 {
     stream_response_inner(response, FrameMode::LineDelimited, handler)
 }
 
-fn stream_response_inner<F>(
-    response: reqwest::Response,
-    mode: FrameMode,
-    handler: F,
-) -> ChunkStream
+fn stream_response_inner<F>(response: reqwest::Response, mode: FrameMode, handler: F) -> ChunkStream
 where
     F: Fn(&str) -> HandlerAction + Send + 'static,
 {
@@ -149,16 +139,14 @@ where
             for frame in extract_frames(&mut buffer, mode) {
                 match frame {
                     ParsedFrame::Done => return,
-                    ParsedFrame::Data(data) => {
-                        match handler(&data) {
-                            HandlerAction::Emit(chunks) => {
-                                for chunk in chunks {
-                                    let _ = tx.send(chunk).await;
-                                }
+                    ParsedFrame::Data(data) => match handler(&data) {
+                        HandlerAction::Emit(chunks) => {
+                            for chunk in chunks {
+                                let _ = tx.send(chunk).await;
                             }
-                            HandlerAction::Done => return,
                         }
-                    }
+                        HandlerAction::Done => return,
+                    },
                 }
             }
         }

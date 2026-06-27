@@ -18,10 +18,7 @@ pub struct ShutdownState {
 pub async fn shutdown_handler(State(state): State<ShutdownState>) -> (StatusCode, Json<Value>) {
     if let Some(tx) = state.tx.lock().unwrap().take() {
         let _ = tx.send(());
-        (
-            StatusCode::OK,
-            Json(json!({ "status": "shutting_down" })),
-        )
+        (StatusCode::OK, Json(json!({ "status": "shutting_down" })))
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,

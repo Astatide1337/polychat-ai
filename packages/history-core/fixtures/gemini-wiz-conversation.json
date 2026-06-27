@@ -1,0 +1,28 @@
+{
+  "cid": "gemini-wiz-conv-1",
+  "title": "Gemini WIZ fallback",
+  "model": "gemini-2.5-flash",
+  "created_at": "2026-06-24T17:00:00.000Z",
+  "updated_at": "2026-06-24T17:05:00.000Z",
+  "geminiWiz": {
+    "rows": [
+      [null, null, null, null, { "text": "What is the difference between TCP and UDP?" }, null, null, null],
+      [
+        null,
+        null,
+        null,
+        null,
+        {
+          "payload": [
+            { "type": "image", "src": "data:image/png;base64,AAAA" },
+            { "kind": "artifact", "label": "Protocol chart" },
+            { "payload": { "text": "TCP is reliable while UDP is connectionless." } }
+          ]
+        },
+        null,
+        null,
+        null
+      ]
+    ]
+  }
+}

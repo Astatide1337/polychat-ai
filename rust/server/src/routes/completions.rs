@@ -9,15 +9,15 @@ use uuid::Uuid;
 
 use crate::config::PolychatConfig;
 use crate::providers::{ChatOptions, ToolCallStrategy};
+use crate::router::SharedModelRegistry;
 pub use crate::routes::completion_messages::CompletionRequest;
 use crate::routes::completion_messages::{
     completion_messages_to_provider_messages, has_tool_transcript,
 };
+use crate::routes::conversation_tracker::{tracked_conversation_id, TRACKER};
 use crate::routes::emulated_completion::emulated_completion_response;
-use crate::routes::conversation_tracker::{TRACKER, tracked_conversation_id};
 use crate::routes::errors::RouteError;
 use crate::routes::openai_format::{non_stream_response, stream_response};
-use crate::router::SharedModelRegistry;
 use crate::tools::inject::inject_tools;
 
 fn temporary_conversation_source(temporary: bool, explicit: bool, tracked: bool) -> &'static str {
@@ -32,7 +32,12 @@ fn temporary_conversation_source(temporary: bool, explicit: bool, tracked: bool)
     }
 }
 
-fn error_response(status: StatusCode, message: &str, err_type: &'static str, code: &'static str) -> axum::response::Response {
+fn error_response(
+    status: StatusCode,
+    message: &str,
+    err_type: &'static str,
+    code: &'static str,
+) -> axum::response::Response {
     RouteError::new(status, message, err_type, code).into_response()
 }
 
@@ -48,7 +53,8 @@ pub async fn completions_handler(
             "Missing model",
             "invalid_request_error",
             "missing_model",
-        ).into_response();
+        )
+        .into_response();
     }
 
     let resolved = {
@@ -63,7 +69,8 @@ pub async fn completions_handler(
                 &format!("Model '{}' not found for any connected provider.", model),
                 "invalid_request_error",
                 "model_not_found",
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
@@ -74,7 +81,9 @@ pub async fn completions_handler(
     let tool_strategy = provider.tool_call_strategy();
 
     // Per-provider temporary default from config, overridden by request
-    let config_temporary = config.providers.get(&provider_id)
+    let config_temporary = config
+        .providers
+        .get(&provider_id)
         .map(|pc| pc.temporary)
         .unwrap_or(false);
     let temporary = body.temporary || config_temporary;
@@ -99,7 +108,9 @@ pub async fn completions_handler(
     } else {
         tracked_conversation_id(&provider_id, &provider_messages)
     };
-    let conv_id_to_use = explicit_conversation_id.clone().or_else(|| tracked_conversation_id.clone());
+    let conv_id_to_use = explicit_conversation_id
+        .clone()
+        .or_else(|| tracked_conversation_id.clone());
 
     if has_tools || (tool_strategy == ToolCallStrategy::Emulated && has_tool_history) {
         match tool_strategy {
@@ -121,42 +132,50 @@ pub async fn completions_handler(
                     provider_messages,
                     conv_id_to_use,
                     &format!("chatcmpl-{}", Uuid::new_v4()),
-                ).await;
+                )
+                .await;
             }
         }
     }
 
-    let provider_response = match provider.send_message(
-        &messages,
-        model,
-        &options,
-        conv_id_to_use.as_deref(),
-    ).await {
+    let provider_response = match provider
+        .send_message(&messages, model, &options, conv_id_to_use.as_deref())
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
             if msg.to_lowercase().contains("expired") {
                 return error_response(
-                    StatusCode::UNAUTHORIZED, &msg,
-                    "authentication_error", "session_expired",
-                ).into_response();
+                    StatusCode::UNAUTHORIZED,
+                    &msg,
+                    "authentication_error",
+                    "session_expired",
+                )
+                .into_response();
             }
             if msg.to_lowercase().contains("rate limit") {
                 return error_response(
-                    StatusCode::TOO_MANY_REQUESTS, &msg,
-                    "rate_limit_error", "rate_limited",
-                ).into_response();
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &msg,
+                    "rate_limit_error",
+                    "rate_limited",
+                )
+                .into_response();
             }
             return error_response(
-                StatusCode::BAD_GATEWAY, &msg,
-                "upstream_error", "upstream_error",
-            ).into_response();
+                StatusCode::BAD_GATEWAY,
+                &msg,
+                "upstream_error",
+                "upstream_error",
+            )
+            .into_response();
         }
     };
 
     if !temporary {
         if let Some(ref cid) = provider_response.conversation_id {
-        TRACKER.store(&provider_messages, &provider_id, cid.clone());
+            TRACKER.store(&provider_messages, &provider_id, cid.clone());
         }
     }
 
@@ -181,19 +200,27 @@ pub async fn completions_handler(
     if stream {
         stream_response(provider_response.stream, &request_id, model, has_tools).into_response()
     } else {
-        non_stream_response(provider_response.stream, &request_id, model, has_tools, provider_debug).await.into_response()
+        non_stream_response(
+            provider_response.stream,
+            &request_id,
+            model,
+            has_tools,
+            provider_debug,
+        )
+        .await
+        .into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::ProviderConfig;
     use super::temporary_conversation_source;
+    use crate::config::ProviderConfig;
 
     #[test]
     fn detects_tool_transcript_from_assistant_tool_calls_and_tool_result() {
         use crate::routes::completion_messages::{
-            CompletionMessage, CompletionToolCall, CompletionToolFunction, has_tool_transcript,
+            has_tool_transcript, CompletionMessage, CompletionToolCall, CompletionToolFunction,
         };
         use serde_json::Value;
 
@@ -255,27 +282,39 @@ mod tests {
     #[test]
     fn config_provider_temporary_lookup_missing_provider() {
         let mut providers = std::collections::HashMap::new();
-        providers.insert("chatgpt".to_string(), ProviderConfig {
-            default_model: "gpt-5-5".into(),
-            connected: true,
-            last_validated: None,
-            temporary: true,
-        });
+        providers.insert(
+            "chatgpt".to_string(),
+            ProviderConfig {
+                default_model: "gpt-5-5".into(),
+                connected: true,
+                last_validated: None,
+                temporary: true,
+            },
+        );
         // Looking up a provider that doesn't exist should return false
-        let result = providers.get("claude").map(|pc| pc.temporary).unwrap_or(false);
+        let result = providers
+            .get("claude")
+            .map(|pc| pc.temporary)
+            .unwrap_or(false);
         assert!(!result);
     }
 
     #[test]
     fn config_provider_temporary_lookup_existing_provider() {
         let mut providers = std::collections::HashMap::new();
-        providers.insert("chatgpt".to_string(), ProviderConfig {
-            default_model: "gpt-5-5".into(),
-            connected: true,
-            last_validated: None,
-            temporary: true,
-        });
-        let result = providers.get("chatgpt").map(|pc| pc.temporary).unwrap_or(false);
+        providers.insert(
+            "chatgpt".to_string(),
+            ProviderConfig {
+                default_model: "gpt-5-5".into(),
+                connected: true,
+                last_validated: None,
+                temporary: true,
+            },
+        );
+        let result = providers
+            .get("chatgpt")
+            .map(|pc| pc.temporary)
+            .unwrap_or(false);
         assert!(result);
     }
 
@@ -293,7 +332,10 @@ mod tests {
 
     #[test]
     fn non_temporary_requests_preserve_existing_conversation_source_logic() {
-        assert_eq!(temporary_conversation_source(false, true, false), "provided");
+        assert_eq!(
+            temporary_conversation_source(false, true, false),
+            "provided"
+        );
         assert_eq!(temporary_conversation_source(false, false, true), "tracked");
         assert_eq!(temporary_conversation_source(false, false, false), "new");
     }

@@ -17,9 +17,10 @@ Polychat captures Gemini browser cookies from a supported browser session and st
 For each request Polychat:
 
 1. fetches `https://gemini.google.com/app`
-2. extracts the `SNlM0e` token from the HTML
-3. posts to Gemini's BardChatUi `StreamGenerate` endpoint
-4. parses the line-delimited response into OpenAI-compatible output
+2. extracts the current build label and `f.sid` bootstrap token from the HTML
+3. sends the Gemini RPC once without `at` to obtain an xsrf bootstrap token
+4. retries the RPC with that xsrf token in `at`
+5. parses the line-delimited response into OpenAI-compatible output
 
 ## Models
 
@@ -37,9 +38,11 @@ Setting `inner_req_list[45] = 1` prevents the conversation from being saved to G
 
 Gemini conversation listing uses the batchexecute RPC endpoint with rpcid `MaZiqc`. The payload format is `[13, null, [pinned_flag, null, 1]]` where `pinned_flag` is 1 for pinned chats and 0 for unpinned. Both are fetched in parallel and deduplicated. The response format follows the standard batchexecute framing: each part's `[2]` field is a JSON string containing `part_body[2]` as the chat list array. Each chat entry: `[cid, title, is_pinned, ..., [seconds, nanos]]`.
 
+Gemini conversation detail fetches use rpcid `hNvQHb` with the upstream read-chat payload `[conversation_id, 10, null, 1, [1], [4], null, 1]` and `source-path=/app`. The response frames contain `inner[0]` as the turn list, where each turn provides user text at `turn[2][0][0]` and assistant text at `turn[3][0][0][1][0]`. If the RPC returns no transcript, Polychat falls back to the conversation page HTML and decodes the embedded `WIZ_global_data.TSDtV` transcript snapshot.
+
 ## Session Expiry
 
-The `SNlM0e` token extracted from `gemini.google.com/app` expires within hours. Google session cookies themselves expire after hours to days. When Gemini returns 401 `session_expired`, re-run `polychat login gemini` to refresh cookies.
+Gemini requests depend on a valid Google cookie session, the page bootstrap `f.sid` value, and a fresh xsrf bootstrap token per RPC. Google session cookies themselves expire after hours to days. When Gemini returns 401 `session_expired` or repeated bootstrap failures, re-run `polychat login gemini` to refresh cookies.
 
 ## Tool Calling
 

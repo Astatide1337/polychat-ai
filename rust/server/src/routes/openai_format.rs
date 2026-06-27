@@ -141,7 +141,11 @@ pub struct StreamFunctionDelta {
     pub arguments: Option<String>,
 }
 
-pub fn text_completion_response(request_id: &str, model: &str, content: String) -> ChatCompletionResponse {
+pub fn text_completion_response(
+    request_id: &str,
+    model: &str,
+    content: String,
+) -> ChatCompletionResponse {
     completion_response(
         request_id,
         model,
@@ -155,7 +159,12 @@ pub fn text_completion_response(request_id: &str, model: &str, content: String) 
     )
 }
 
-pub fn tool_call_completion_response(request_id: &str, model: &str, name: String, arguments: String) -> ChatCompletionResponse {
+pub fn tool_call_completion_response(
+    request_id: &str,
+    model: &str,
+    name: String,
+    arguments: String,
+) -> ChatCompletionResponse {
     completion_response(
         request_id,
         model,
@@ -177,7 +186,11 @@ pub async fn non_stream_response(
     provider_debug: Option<Value>,
 ) -> Json<ChatCompletionResponse> {
     let mut full_content = String::new();
-    let mut parser = if has_tools { Some(ToolCallParser::new()) } else { None };
+    let mut parser = if has_tools {
+        Some(ToolCallParser::new())
+    } else {
+        None
+    };
     let mut tool_calls = Vec::new();
 
     while let Some(result) = chunk_stream.next().await {
@@ -237,16 +250,35 @@ pub async fn non_stream_response(
     }
 }
 
-pub fn stream_response(mut chunk_stream: ChunkStream, request_id: &str, model: &str, has_tools: bool) -> axum::response::Response {
+pub fn stream_response(
+    mut chunk_stream: ChunkStream,
+    request_id: &str,
+    model: &str,
+    has_tools: bool,
+) -> axum::response::Response {
     let request_id = request_id.to_string();
     let model = model.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::io::Error>>(256);
 
     tokio::spawn(async move {
-        let mut parser = if has_tools { Some(ToolCallParser::new()) } else { None };
+        let mut parser = if has_tools {
+            Some(ToolCallParser::new())
+        } else {
+            None
+        };
         let mut tool_call_index = 0;
 
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { role: Some("assistant"), ..Default::default() }, None))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta {
+                    role: Some("assistant"),
+                    ..Default::default()
+                },
+                None,
+            )))
+            .await;
 
         while let Some(result) = chunk_stream.next().await {
             match result {
@@ -255,33 +287,76 @@ pub fn stream_response(mut chunk_stream: ChunkStream, request_id: &str, model: &
                         for parsed in parser.feed(ChatChunk::Content(text)) {
                             match parsed {
                                 ParsedChunk::Content(t) => {
-                                    let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { content: Some(t), ..Default::default() }, None))).await;
+                                    let _ = tx
+                                        .send(Ok(format_sse_chunk(
+                                            &request_id,
+                                            &model,
+                                            StreamDelta {
+                                                content: Some(t),
+                                                ..Default::default()
+                                            },
+                                            None,
+                                        )))
+                                        .await;
                                 }
                                 ParsedChunk::Thinking(t) => {
-                                    let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { reasoning_content: Some(t), ..Default::default() }, None))).await;
+                                    let _ = tx
+                                        .send(Ok(format_sse_chunk(
+                                            &request_id,
+                                            &model,
+                                            StreamDelta {
+                                                reasoning_content: Some(t),
+                                                ..Default::default()
+                                            },
+                                            None,
+                                        )))
+                                        .await;
                                 }
                                 ParsedChunk::ToolCall { name, arguments } => {
                                     let call_id = format!("call_{}", Uuid::new_v4());
-                                    let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta {
-                                        tool_calls: Some(vec![StreamToolCallDelta {
-                                            index: tool_call_index,
-                                            id: Some(call_id),
-                                            kind: Some("function"),
-                                            function: StreamFunctionDelta { name: Some(name), arguments: Some(String::new()) },
-                                        }]),
-                                        ..Default::default()
-                                    }, None))).await;
+                                    let _ = tx
+                                        .send(Ok(format_sse_chunk(
+                                            &request_id,
+                                            &model,
+                                            StreamDelta {
+                                                tool_calls: Some(vec![StreamToolCallDelta {
+                                                    index: tool_call_index,
+                                                    id: Some(call_id),
+                                                    kind: Some("function"),
+                                                    function: StreamFunctionDelta {
+                                                        name: Some(name),
+                                                        arguments: Some(String::new()),
+                                                    },
+                                                }]),
+                                                ..Default::default()
+                                            },
+                                            None,
+                                        )))
+                                        .await;
 
                                     for chunk in arguments.as_bytes().chunks(10) {
-                                        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta {
-                                            tool_calls: Some(vec![StreamToolCallDelta {
-                                                index: tool_call_index,
-                                                id: None,
-                                                kind: None,
-                                                function: StreamFunctionDelta { name: None, arguments: Some(String::from_utf8_lossy(chunk).to_string()) },
-                                            }]),
-                                            ..Default::default()
-                                        }, None))).await;
+                                        let _ = tx
+                                            .send(Ok(format_sse_chunk(
+                                                &request_id,
+                                                &model,
+                                                StreamDelta {
+                                                    tool_calls: Some(vec![StreamToolCallDelta {
+                                                        index: tool_call_index,
+                                                        id: None,
+                                                        kind: None,
+                                                        function: StreamFunctionDelta {
+                                                            name: None,
+                                                            arguments: Some(
+                                                                String::from_utf8_lossy(chunk)
+                                                                    .to_string(),
+                                                            ),
+                                                        },
+                                                    }]),
+                                                    ..Default::default()
+                                                },
+                                                None,
+                                            )))
+                                            .await;
                                     }
 
                                     tool_call_index += 1;
@@ -289,11 +364,31 @@ pub fn stream_response(mut chunk_stream: ChunkStream, request_id: &str, model: &
                             }
                         }
                     } else {
-                        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { content: Some(text), ..Default::default() }, None))).await;
+                        let _ = tx
+                            .send(Ok(format_sse_chunk(
+                                &request_id,
+                                &model,
+                                StreamDelta {
+                                    content: Some(text),
+                                    ..Default::default()
+                                },
+                                None,
+                            )))
+                            .await;
                     }
                 }
                 Ok(ChatChunk::Thinking(text)) => {
-                    let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { reasoning_content: Some(text), ..Default::default() }, None))).await;
+                    let _ = tx
+                        .send(Ok(format_sse_chunk(
+                            &request_id,
+                            &model,
+                            StreamDelta {
+                                reasoning_content: Some(text),
+                                ..Default::default()
+                            },
+                            None,
+                        )))
+                        .await;
                 }
                 Err(e) => {
                     tracing::warn!("Stream error: {}", e);
@@ -305,37 +400,94 @@ pub fn stream_response(mut chunk_stream: ChunkStream, request_id: &str, model: &
         if let Some(ref mut parser) = parser {
             for parsed in parser.flush() {
                 if let ParsedChunk::Content(t) = parsed {
-                    let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { content: Some(t), ..Default::default() }, None))).await;
+                    let _ = tx
+                        .send(Ok(format_sse_chunk(
+                            &request_id,
+                            &model,
+                            StreamDelta {
+                                content: Some(t),
+                                ..Default::default()
+                            },
+                            None,
+                        )))
+                        .await;
                 }
             }
         }
 
-        let finish_reason = if has_tools && tool_call_index > 0 { Some("tool_calls".to_string()) } else { Some("stop".to_string()) };
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta::default(), finish_reason))).await;
+        let finish_reason = if has_tools && tool_call_index > 0 {
+            Some("tool_calls".to_string())
+        } else {
+            Some("stop".to_string())
+        };
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta::default(),
+                finish_reason,
+            )))
+            .await;
         let _ = tx.send(Ok("data: [DONE]\n\n".into())).await;
     });
 
     event_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-pub fn emulated_stream_text_response(request_id: &str, model: &str, content: String) -> axum::response::Response {
+pub fn emulated_stream_text_response(
+    request_id: &str,
+    model: &str,
+    content: String,
+) -> axum::response::Response {
     let request_id = request_id.to_string();
     let model = model.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::io::Error>>(16);
 
     tokio::spawn(async move {
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { role: Some("assistant"), ..Default::default() }, None))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta {
+                    role: Some("assistant"),
+                    ..Default::default()
+                },
+                None,
+            )))
+            .await;
         if !content.is_empty() {
-            let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { content: Some(content), ..Default::default() }, None))).await;
+            let _ = tx
+                .send(Ok(format_sse_chunk(
+                    &request_id,
+                    &model,
+                    StreamDelta {
+                        content: Some(content),
+                        ..Default::default()
+                    },
+                    None,
+                )))
+                .await;
         }
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta::default(), Some("stop".to_string())))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta::default(),
+                Some("stop".to_string()),
+            )))
+            .await;
         let _ = tx.send(Ok("data: [DONE]\n\n".into())).await;
     });
 
     event_stream_response(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-pub fn emulated_stream_tool_call_response(request_id: &str, model: &str, name: &str, arguments: &str) -> axum::response::Response {
+pub fn emulated_stream_tool_call_response(
+    request_id: &str,
+    model: &str,
+    name: &str,
+    arguments: &str,
+) -> axum::response::Response {
     let request_id = request_id.to_string();
     let model = model.to_string();
     let name = name.to_string();
@@ -343,31 +495,68 @@ pub fn emulated_stream_tool_call_response(request_id: &str, model: &str, name: &
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::io::Error>>(16);
 
     tokio::spawn(async move {
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta { role: Some("assistant"), ..Default::default() }, None))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta {
+                    role: Some("assistant"),
+                    ..Default::default()
+                },
+                None,
+            )))
+            .await;
         let call_id = format!("call_{}", Uuid::new_v4());
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta {
-            tool_calls: Some(vec![StreamToolCallDelta {
-                index: 0,
-                id: Some(call_id),
-                kind: Some("function"),
-                function: StreamFunctionDelta { name: Some(name), arguments: Some(String::new()) },
-            }]),
-            ..Default::default()
-        }, None))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta {
+                    tool_calls: Some(vec![StreamToolCallDelta {
+                        index: 0,
+                        id: Some(call_id),
+                        kind: Some("function"),
+                        function: StreamFunctionDelta {
+                            name: Some(name),
+                            arguments: Some(String::new()),
+                        },
+                    }]),
+                    ..Default::default()
+                },
+                None,
+            )))
+            .await;
 
         for chunk in arguments.as_bytes().chunks(32) {
-            let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta {
-                tool_calls: Some(vec![StreamToolCallDelta {
-                    index: 0,
-                    id: None,
-                    kind: None,
-                    function: StreamFunctionDelta { name: None, arguments: Some(String::from_utf8_lossy(chunk).to_string()) },
-                }]),
-                ..Default::default()
-            }, None))).await;
+            let _ = tx
+                .send(Ok(format_sse_chunk(
+                    &request_id,
+                    &model,
+                    StreamDelta {
+                        tool_calls: Some(vec![StreamToolCallDelta {
+                            index: 0,
+                            id: None,
+                            kind: None,
+                            function: StreamFunctionDelta {
+                                name: None,
+                                arguments: Some(String::from_utf8_lossy(chunk).to_string()),
+                            },
+                        }]),
+                        ..Default::default()
+                    },
+                    None,
+                )))
+                .await;
         }
 
-        let _ = tx.send(Ok(format_sse_chunk(&request_id, &model, StreamDelta::default(), Some("tool_calls".to_string())))).await;
+        let _ = tx
+            .send(Ok(format_sse_chunk(
+                &request_id,
+                &model,
+                StreamDelta::default(),
+                Some("tool_calls".to_string()),
+            )))
+            .await;
         let _ = tx.send(Ok("data: [DONE]\n\n".into())).await;
     });
 
@@ -385,35 +574,59 @@ where
             (header::CONTENT_TYPE, "text/event-stream".to_string()),
             (header::CACHE_CONTROL, "no-cache".to_string()),
             (header::CONNECTION, "keep-alive".to_string()),
-            (axum::http::header::HeaderName::from_static("x-accel-buffering"), "no".to_string()),
+            (
+                axum::http::header::HeaderName::from_static("x-accel-buffering"),
+                "no".to_string(),
+            ),
         ],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
 
-pub fn format_sse_chunk(id: &str, model: &str, delta: StreamDelta, finish_reason: Option<String>) -> String {
+pub fn format_sse_chunk(
+    id: &str,
+    model: &str,
+    delta: StreamDelta,
+    finish_reason: Option<String>,
+) -> String {
     let chunk = ChatCompletionChunk {
         id: id.to_string(),
         object: "chat.completion.chunk",
         created: chrono::Utc::now().timestamp(),
         model: model.to_string(),
-        choices: vec![ChatCompletionChunkChoice { index: 0, delta, finish_reason }],
+        choices: vec![ChatCompletionChunkChoice {
+            index: 0,
+            delta,
+            finish_reason,
+        }],
     };
     format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_sse_chunk, text_completion_response, tool_call_completion_response, StreamDelta, StreamFunctionDelta, StreamToolCallDelta};
+    use super::{
+        format_sse_chunk, text_completion_response, tool_call_completion_response, StreamDelta,
+        StreamFunctionDelta, StreamToolCallDelta,
+    };
     use serde_json::{json, Value};
 
     #[test]
     fn tool_call_completion_response_has_expected_shape() {
-        let response = tool_call_completion_response("chatcmpl-1", "deepseek-chat", "bash".into(), "{\"command\":\"pwd\"}".into());
+        let response = tool_call_completion_response(
+            "chatcmpl-1",
+            "deepseek-chat",
+            "bash".into(),
+            "{\"command\":\"pwd\"}".into(),
+        );
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(value["choices"][0]["message"]["content"], Value::Null);
-        assert_eq!(value["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "bash");
+        assert_eq!(
+            value["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "bash"
+        );
     }
 
     #[test]
@@ -445,7 +658,10 @@ mod tests {
                     index: 0,
                     id: Some("call_1".into()),
                     kind: Some("function"),
-                    function: StreamFunctionDelta { name: Some("bash".into()), arguments: Some(String::new()) },
+                    function: StreamFunctionDelta {
+                        name: Some("bash".into()),
+                        arguments: Some(String::new()),
+                    },
                 }]),
                 ..Default::default()
             },

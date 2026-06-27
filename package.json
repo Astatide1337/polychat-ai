@@ -4,6 +4,10 @@
   "description": "Self-hosted browser-backed AI CLI and local OpenAI-compatible API server.",
   "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "bin": {
     "polychat": "dist/index.js"
   },
@@ -41,11 +45,21 @@
     "build": "tsup",
     "build:web": "vite build --config web/vite.config.ts",
     "build:server": "cargo build --release --manifest-path rust/Cargo.toml",
+    "build:history": "npm --workspace packages/history-core run build",
+    "build:mcp": "npm --workspace apps/mcp run build",
+    "build:extension": "npm --workspace apps/extension run build",
+    "build:workspaces": "npm run build:history && npm run build:mcp && npm run build:extension",
     "dev": "tsup --watch",
     "dev:web": "vite --config web/vite.config.ts",
+    "dev:mcp": "npm --workspace apps/mcp run dev",
+    "dev:extension": "npm --workspace apps/extension run dev",
     "start": "node dist/index.js",
     "test": "node --test test/**/*.test.mjs",
     "test:web": "vitest run --config web/vitest.config.ts",
+    "test:history": "npm --workspace packages/history-core run test",
+    "test:workspaces": "npm run test:history && npm --workspace apps/mcp run test",
+    "verify:polychat-history": "node scripts/verify-polychat-history.mjs",
+    "verify": "npm run build && npm run build:web && npm run build:workspaces && npm run verify:polychat-history && npm run test && npm run test:web && npm run test:workspaces",
     "test:e2e": "playwright test",
     "test:live:web": "node scripts/live-webui-e2e.mjs",
     "conformance:report": "node scripts/conformance-report.mjs",
@@ -53,8 +67,8 @@
     "stage:binary:all": "node scripts/stage-binary.mjs --all",
     "verify:package": "node scripts/verify-package.mjs",
     "verify:package:all": "node scripts/verify-package.mjs --all",
-    "prepack": "npm run build && npm run build:web && npm run build:server && npm run stage:binary && npm run verify:package",
-    "prepublishOnly": "npm run verify:package:all",
+    "prepack": "npm run build && npm run build:web && npm run build:workspaces && npm run build:server && npm run stage:binary && npm run verify:package",
+    "prepublishOnly": "npm run verify && npm run verify:package:all",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
@@ -69,7 +83,7 @@
     "ora": "^9.4.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.7",
-    "ws": "^8.0.0"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.0",
