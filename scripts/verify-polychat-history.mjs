@@ -95,6 +95,7 @@ try {
   let localStatus = null;
   let ingestState = null;
   let mcpToolsArtifact = null;
+  let smokeResult = null;
 
   try {
     debugLog("wait for health");
@@ -115,35 +116,28 @@ try {
     };
 
     debugLog("live browser smoke");
-    const smokeResult = await maybeRunLiveBrowserSmoke({
+    smokeResult = await maybeRunLiveBrowserSmoke({
       baseUrl: server.baseUrl,
       ingestToken,
       dbPath: artifactPaths.dbPath,
+      mcpRoot,
+      stopServer: () => server.stop(),
     });
-    report.live.browserExtensionSmoke = smokeResult;
-    if (smokeResult.status === "passed") {
-      report.checks.browserExtensionSmoke = {
-        passed: true,
-        browserCommand: smokeResult.browserCommand,
-        conversationIds: smokeResult.conversationIds,
-      };
-    } else if (smokeResult.status === "failed") {
-      report.checks.browserExtensionSmoke = {
-        passed: false,
-        browserCommand: smokeResult.browserCommand,
-        error: smokeResult.reason,
-      };
-    }
+    report.live.browserExtensionSmoke = smokeResult.liveSmoke;
+    report.checks.browserExtensionSmoke = {
+      passed: smokeResult.liveSmoke.status !== "failed",
+      status: smokeResult.liveSmoke.status,
+      providers: smokeResult.liveSmoke.providers,
+      reason: smokeResult.liveSmoke.reason ?? null,
+    };
+    mcpToolsArtifact = smokeResult.mcpArtifact;
+    writeArtifact("mcp-tools.json", `${JSON.stringify(mcpToolsArtifact, null, 2)}\n`);
 
     debugLog("sqlite integrity");
   } finally {
     debugLog("stop mcp server");
     await server.stop();
   }
-
-  debugLog("mcp helper probe");
-  mcpToolsArtifact = await runMcpToolChecksViaHelper(artifactPaths.dbPath, mcpRoot);
-  writeArtifact("mcp-tools.json", `${JSON.stringify(mcpToolsArtifact, null, 2)}\n`);
   report.checks.staleReplacement = ingestState.staleReplacement;
   report.checks.safePlainTextSearch = mcpToolsArtifact.callSummaries.searchConversations;
   report.checks.rawPayloadBehavior = mcpToolsArtifact.callSummaries;
@@ -677,7 +671,7 @@ async function ingestLocalData(baseUrl, ingestToken, fixtures) {
   };
 }
 
-async function runMcpToolChecksViaHelper(dbPath, entrypoint) {
+async function runMcpToolChecksViaHelper(dbPath, entrypoint, liveProviderChecks = []) {
   const script = `
     import { spawn } from "node:child_process";
     import { createInterface } from "node:readline";
@@ -685,6 +679,7 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint) {
 
     const dbPath = ${JSON.stringify(dbPath)};
     const entrypoint = ${JSON.stringify(entrypoint)};
+    const liveProviderChecks = ${JSON.stringify(liveProviderChecks)};
 
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
@@ -853,8 +848,81 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint) {
     const resourceRead = await rpc.request("resources/read", {
       uri: "conversation://chatgpt/verify-search-safety",
     });
-
     const parse = (call) => call.json ?? JSON.parse(call.text);
+
+    function assertRawHiddenByDefault({ conversation, messages, searchResults }) {
+      const conversationHasRaw = conversation ? Object.prototype.hasOwnProperty.call(conversation, "raw") : false;
+      const messagesHaveRaw = Array.isArray(messages)
+        ? messages.some((message) => Object.prototype.hasOwnProperty.call(message, "raw"))
+        : false;
+      const searchResultsHaveRaw = Array.isArray(searchResults)
+        ? searchResults.some((result) => Object.prototype.hasOwnProperty.call(result?.conversation ?? {}, "raw"))
+        : false;
+      return !conversationHasRaw && !messagesHaveRaw && !searchResultsHaveRaw;
+    }
+
+    async function verifyLiveProvider(providerCheck) {
+      const getConversation = await rpc.callTool("get_conversation", {
+        provider: providerCheck.provider,
+        conversationId: providerCheck.conversationId,
+        includeMessages: true,
+        includeRaw: false,
+      });
+      const getMessages = await rpc.callTool("get_messages", {
+        provider: providerCheck.provider,
+        conversationId: providerCheck.conversationId,
+        includeRaw: false,
+      });
+      const searchConversations = await rpc.callTool("search_conversations", {
+        provider: providerCheck.provider,
+        query: providerCheck.searchPhrase,
+        syntax: "plain",
+        includeRaw: false,
+        limit: 10,
+      });
+
+      const conversationJson = parse(getConversation);
+      const messagesJson = parse(getMessages);
+      const searchJson = parse(searchConversations);
+      const conversation = conversationJson.conversation ?? null;
+      const conversationMessages = Array.isArray(conversationJson.messages) ? conversationJson.messages : [];
+      const messageList = Array.isArray(messagesJson.messages) ? messagesJson.messages : [];
+      const searchResults = Array.isArray(searchJson.results) ? searchJson.results : [];
+      const searchHit = searchResults.some(
+        (result) =>
+          result?.conversation?.provider === providerCheck.provider &&
+          result?.conversation?.id === providerCheck.conversationId
+      );
+      const rawHiddenByDefault = assertRawHiddenByDefault({
+        conversation,
+        messages: [...conversationMessages, ...messageList],
+        searchResults,
+      });
+      const mcpGetConversation = Boolean(conversation && conversationMessages.length > 0);
+      const mcpGetMessages = messageList.length > 0;
+      const reasons = [];
+      if (!conversation) reasons.push("get_conversation returned no conversation");
+      if (!conversationMessages.length) reasons.push("get_conversation returned no messages");
+      if (!messageList.length) reasons.push("get_messages returned no messages");
+      if (!searchHit) reasons.push("search_conversations did not match the conversation");
+      if (!rawHiddenByDefault) reasons.push("raw payloads were returned by default");
+      return {
+        provider: providerCheck.provider,
+        conversationId: providerCheck.conversationId,
+        status: reasons.length === 0 ? "passed" : "failed",
+        messages: messageList.length,
+        mcpGetConversation,
+        mcpGetMessages,
+        searchHit,
+        rawHiddenByDefault,
+        reason: reasons.length === 0 ? null : reasons.join("; "),
+      };
+    }
+
+    const liveProviders = {};
+    for (const providerCheck of liveProviderChecks) {
+      liveProviders[providerCheck.provider] = await verifyLiveProvider(providerCheck);
+    }
     const listJson = parse(listConversations);
     const listRawJson = parse(listConversationsWithRaw);
     const searchJson = parse(searchConversations);
@@ -931,6 +999,7 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint) {
           mimeType: resourceRead.contents[0].mimeType,
         },
       },
+      liveProviders,
     };
 
     process.stdout.write(\`\${JSON.stringify(result, null, 2)}\\n\`);
@@ -949,86 +1018,306 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint) {
   return JSON.parse(result.stdout.trim());
 }
 
-async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath }) {
+async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot, stopServer }) {
   const popupUrl = process.env.POLYCHAT_EXTENSION_POPUP_URL?.trim();
   const testMode = process.env.POLYCHAT_EXTENSION_TEST_MODE === "1";
-  const chatgpt = process.env.POLYCHAT_TEST_CHATGPT_CONVERSATION_ID?.trim();
-  const claude = process.env.POLYCHAT_TEST_CLAUDE_CONVERSATION_ID?.trim();
-  const gemini = process.env.POLYCHAT_TEST_GEMINI_CONVERSATION_ID?.trim();
-  const configMissing = [];
+  const providerPlans = buildLiveProviderPlans();
+  const configuredProviders = providerPlans.filter((provider) => provider.status === "configured");
+  const livePrereqsMissing = [];
 
-  if (!popupUrl) configMissing.push("POLYCHAT_EXTENSION_POPUP_URL");
-  if (!testMode) configMissing.push("POLYCHAT_EXTENSION_TEST_MODE=1");
-  if (!chatgpt) configMissing.push("POLYCHAT_TEST_CHATGPT_CONVERSATION_ID");
-  if (!claude) configMissing.push("POLYCHAT_TEST_CLAUDE_CONVERSATION_ID");
-  if (!gemini) configMissing.push("POLYCHAT_TEST_GEMINI_CONVERSATION_ID");
+  if (!popupUrl) livePrereqsMissing.push("POLYCHAT_EXTENSION_POPUP_URL");
+  if (!testMode) livePrereqsMissing.push("POLYCHAT_EXTENSION_TEST_MODE=1");
 
-  if (configMissing.length > 0) {
-    return {
-      status: "skipped",
-      reason: `missing ${configMissing.join(", ")}`,
-    };
-  }
-
-  const url = new URL(popupUrl);
-  url.search = new URLSearchParams({
-    autotest: "1",
-    serverUrl: baseUrl,
-    ingestToken,
-    chatgpt,
-    claude,
-    gemini,
-  }).toString();
-
-  const launched = await launchBrowser(url.href);
-  const deadline = Date.now() + 90_000;
-  const expected = [
-    { provider: "chatgpt", id: chatgpt },
-    { provider: "claude", id: claude },
-    { provider: "gemini", id: gemini },
-  ];
-  const found = new Map();
-
-  while (Date.now() < deadline) {
-    const present = await readConversationIdsFromDb(dbPath, expected);
-    if (present.has(`chatgpt:${chatgpt}`)) found.set("chatgpt", chatgpt);
-    if (present.has(`claude:${claude}`)) found.set("claude", claude);
-    if (present.has(`gemini:${gemini}`)) found.set("gemini", gemini);
-    if (found.size === 3) {
-      return {
-        status: "passed",
-        browserCommand: launched.command,
-        conversationIds: Object.fromEntries(found.entries()),
-      };
+  if (configuredProviders.length > 0 && livePrereqsMissing.length === 0) {
+    let browserLaunched = false;
+    try {
+      await buildTestModeExtension();
+      const url = new URL(popupUrl);
+      url.search = new URLSearchParams({
+        autotest: "1",
+        serverUrl: baseUrl,
+        ingestToken,
+        chatgpt: configuredProviders.find((provider) => provider.provider === "chatgpt")?.conversationId ?? "",
+        claude: configuredProviders.find((provider) => provider.provider === "claude")?.conversationId ?? "",
+        gemini: configuredProviders.find((provider) => provider.provider === "gemini")?.conversationId ?? "",
+      }).toString();
+      await launchBrowser(url.href);
+      browserLaunched = true;
+      const providerSyncs = await waitForLiveProviderSyncs(dbPath, configuredProviders);
+      for (const sync of providerSyncs) {
+        const result = providerPlans.find((provider) => provider.provider === sync.provider);
+        if (!result) continue;
+        result.messages = sync.messages;
+        result.status = sync.status;
+        result.reason = sync.reason;
+      }
+    } catch (error) {
+      const reason = `live browser smoke failed: ${error instanceof Error ? error.message : String(error)}`;
+      for (const provider of configuredProviders) {
+        provider.status = "failed";
+        provider.reason = reason;
+      }
+      debugLog("live browser smoke browser launch/state", { browserLaunched, reason });
     }
-    await sleep(2_000);
+  } else if (configuredProviders.length > 0) {
+    const reason = `missing ${livePrereqsMissing.join(", ")}`;
+    for (const provider of configuredProviders) {
+      provider.status = "failed";
+      provider.reason = reason;
+    }
   }
+
+  debugLog("stop mcp server before live MCP probe");
+  await stopServer().catch(() => {});
+
+  const mcpArtifact = await runMcpToolChecksViaHelper(
+    dbPath,
+    mcpRoot,
+    configuredProviders.map(({ provider, conversationId, searchPhrase }) => ({ provider, conversationId, searchPhrase }))
+  );
+
+  for (const provider of configuredProviders) {
+    const helper = mcpArtifact.liveProviders?.[provider.provider];
+    if (!helper) continue;
+    provider.mcpGetConversation = helper.mcpGetConversation;
+    provider.mcpGetMessages = helper.mcpGetMessages;
+    provider.searchHit = helper.searchHit;
+    provider.rawHiddenByDefault = helper.rawHiddenByDefault;
+    if (provider.status !== "failed" && helper.status !== "passed") {
+      provider.status = "failed";
+      provider.reason = helper.reason ?? provider.reason ?? "live MCP verification failed";
+      continue;
+    }
+    if (provider.status !== "failed") {
+      provider.status = "passed";
+      provider.reason = null;
+    }
+  }
+
+  const providers = {
+    chatgpt: finalizeLiveProviderReport(providerPlans.find((provider) => provider.provider === "chatgpt")),
+    claude: finalizeLiveProviderReport(providerPlans.find((provider) => provider.provider === "claude")),
+    gemini: finalizeLiveProviderReport(providerPlans.find((provider) => provider.provider === "gemini")),
+  };
+  const status = summarizeLiveSmokeStatus(providerPlans);
+  const reason = summarizeLiveSmokeReason(providerPlans);
 
   return {
-    status: "failed",
-    browserCommand: launched.command,
-    reason: `timed out waiting for designated test conversations: ${expected
-      .filter(({ provider }) => !found.has(provider))
-      .map(({ provider, id }) => `${provider}:${id}`)
-      .join(", ")}`,
+    liveSmoke: {
+      status,
+      reason,
+      providers,
+    },
+    mcpArtifact,
   };
 }
 
-async function readConversationIdsFromDb(dbPath, expected) {
+function buildLiveProviderPlans() {
+  return [
+    buildLiveProviderPlan(
+      "chatgpt",
+      process.env.POLYCHAT_TEST_CHATGPT_CONVERSATION_ID?.trim() || "",
+      process.env.POLYCHAT_TEST_CHATGPT_SEARCH_PHRASE?.trim() || ""
+    ),
+    buildLiveProviderPlan(
+      "claude",
+      process.env.POLYCHAT_TEST_CLAUDE_CONVERSATION_ID?.trim() || "",
+      process.env.POLYCHAT_TEST_CLAUDE_SEARCH_PHRASE?.trim() || ""
+    ),
+    buildLiveProviderPlan(
+      "gemini",
+      process.env.POLYCHAT_TEST_GEMINI_CONVERSATION_ID?.trim() || "",
+      process.env.POLYCHAT_TEST_GEMINI_SEARCH_PHRASE?.trim() || ""
+    ),
+  ];
+}
+
+function buildLiveProviderPlan(provider, conversationId, searchPhrase) {
+  const base = {
+    provider,
+    conversationId: conversationId || null,
+    messages: 0,
+    mcpGetConversation: false,
+    mcpGetMessages: false,
+    searchHit: false,
+    rawHiddenByDefault: false,
+    status: "skipped",
+    reason: "not configured",
+  };
+
+  if (!conversationId && !searchPhrase) {
+    return base;
+  }
+  if (!conversationId || !searchPhrase) {
+    return {
+      ...base,
+      status: "failed",
+      reason: conversationId ? "missing search phrase" : "missing conversation id",
+    };
+  }
+  return {
+    ...base,
+    status: "configured",
+    reason: null,
+    searchPhrase,
+  };
+}
+
+async function buildTestModeExtension() {
+  const liveExtensionDist = join(artifactsDir, "extension-live-dist");
+  const build = spawnSync("npm", ["--workspace", "apps/extension", "run", "build"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      POLYCHAT_EXTENSION_TEST_MODE: "1",
+      POLYCHAT_EXTENSION_DIST_DIR: liveExtensionDist,
+    },
+    stdio: "inherit",
+  });
+  if (build.status !== 0) {
+    throw new Error("test-mode extension build failed");
+  }
+}
+
+async function waitForLiveProviderSyncs(dbPath, providers, { timeoutMs = 90_000, intervalMs = 2_000 } = {}) {
+  const states = new Map(
+    providers.map((provider) => [
+      provider.provider,
+      {
+        rowSeen: false,
+        messages: 0,
+      },
+    ])
+  );
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let allPassed = true;
+    for (const provider of providers) {
+      const rowSeen = readConversationExistsFromDb(dbPath, provider.provider, provider.conversationId);
+      const messages = readConversationMessageCountFromDb(dbPath, provider.provider, provider.conversationId);
+      const state = states.get(provider.provider);
+      if (state) {
+        state.rowSeen ||= rowSeen;
+        state.messages = Math.max(state.messages, messages);
+      }
+      if (!(rowSeen && messages > 0)) {
+        allPassed = false;
+      }
+    }
+    if (allPassed) break;
+    await sleep(intervalMs);
+  }
+
+  return providers.map((provider) => {
+    const state = states.get(provider.provider) ?? { rowSeen: false, messages: 0 };
+    if (state.rowSeen && state.messages > 0) {
+      return {
+        provider: provider.provider,
+        messages: state.messages,
+        status: "passed",
+        reason: null,
+      };
+    }
+    return {
+      provider: provider.provider,
+      messages: state.messages,
+      status: "failed",
+      reason: state.rowSeen
+        ? `conversation ${provider.provider}:${provider.conversationId} appeared but message count stayed at 0`
+        : `conversation ${provider.provider}:${provider.conversationId} never appeared in SQLite`,
+    };
+  });
+}
+
+function readConversationExistsFromDb(dbPath, provider, conversationId) {
   const db = new sqlite3.Database(dbPath);
   try {
-    const clauses = expected
-      .map(({ provider, id }) => `(provider = ${sqliteQuote(provider)} AND id = ${sqliteQuote(id)})`)
-      .join(" OR ");
     const rows = db.all(`
-      SELECT provider, id
+      SELECT 1 AS found
       FROM conversations
-      WHERE ${clauses};
+      WHERE provider = ${sqliteQuote(provider)} AND id = ${sqliteQuote(conversationId)}
+      LIMIT 1;
     `);
-    return new Set(rows.map((row) => `${String(row.provider)}:${String(row.id)}`));
+    return rows.length > 0;
   } finally {
     db.close();
   }
+}
+
+function readConversationMessageCountFromDb(dbPath, provider, conversationId) {
+  const db = new sqlite3.Database(dbPath);
+  try {
+    const rows = db.all(`
+      SELECT COUNT(*) AS messageCount
+      FROM messages
+      WHERE provider = ${sqliteQuote(provider)} AND conversation_id = ${sqliteQuote(conversationId)};
+    `);
+    return Number(rows[0]?.messageCount ?? 0);
+  } finally {
+    db.close();
+  }
+}
+
+function finalizeLiveProviderReport(provider) {
+  if (!provider) {
+    return {
+      status: "skipped",
+      reason: "not configured",
+      conversationId: null,
+      messages: 0,
+      mcpGetConversation: false,
+      mcpGetMessages: false,
+      searchHit: false,
+      rawHiddenByDefault: false,
+    };
+  }
+
+  return {
+    status: provider.status === "configured" ? "failed" : provider.status,
+    reason:
+      provider.status === "configured"
+        ? "live provider verification was not completed"
+        : provider.reason,
+    conversationId: provider.conversationId,
+    messages: provider.messages,
+    mcpGetConversation: provider.mcpGetConversation,
+    mcpGetMessages: provider.mcpGetMessages,
+    searchHit: provider.searchHit,
+    rawHiddenByDefault: provider.rawHiddenByDefault,
+  };
+}
+
+function summarizeLiveSmokeStatus(providerPlans) {
+  const statuses = providerPlans.map((provider) => (provider.status === "configured" ? "failed" : provider.status));
+  if (statuses.some((status) => status === "failed")) return "failed";
+  if (statuses.every((status) => status === "skipped")) return "skipped";
+  if (statuses.some((status) => status === "skipped")) return "partial";
+  return "passed";
+}
+
+function summarizeLiveSmokeReason(providerPlans) {
+  const failedReasons = providerPlans
+    .filter((provider) => provider.status === "failed")
+    .map((provider) => `${provider.provider}: ${provider.reason}`)
+    .filter(Boolean);
+  if (failedReasons.length > 0) {
+    return failedReasons.join("; ");
+  }
+  const configured = providerPlans.filter((provider) => provider.status === "configured");
+  if (configured.length > 0) {
+    return "live provider verification was not completed";
+  }
+  const activeOrSkipped = providerPlans.filter((provider) => provider.status !== "skipped");
+  if (activeOrSkipped.length === 0) {
+    return "live provider env vars not configured";
+  }
+  const skipped = providerPlans.filter((provider) => provider.status === "skipped").map((provider) => provider.provider);
+  if (skipped.length > 0) {
+    return `skipped providers: ${skipped.join(", ")}`;
+  }
+  return null;
 }
 
 function sqliteQuote(value) {
@@ -1070,48 +1359,6 @@ function onceEvent(emitter, event) {
   });
 }
 
-async function callToolJson(baseUrl, ingestToken, name, args) {
-  const response = await fetch(`${baseUrl}/v1/mcp/tools/${encodeURIComponent(name)}/call`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${ingestToken}`,
-    },
-    body: JSON.stringify({ arguments: args }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) {
-    throw new Error(`tool ${name} returned ${response.status}`);
-  }
-  const payload = await response.json();
-  const text = payload?.content?.[0]?.text ?? "{}";
-  return { ...payload, text, json: JSON.parse(text) };
-}
-
-async function readResource(baseUrl, ingestToken, uri) {
-  const response = await fetch(`${baseUrl}/v1/mcp/resources/read`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${ingestToken}`,
-    },
-    body: JSON.stringify({ uri }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) {
-    throw new Error(`resource read returned ${response.status}`);
-  }
-  const payload = await response.json();
-  const contents = payload.contents ?? [];
-  const text = contents[0]?.text ?? "";
-  return {
-    ...payload,
-    uri,
-    mimeType: contents[0]?.mimeType ?? null,
-    text,
-  };
-}
-
 async function writeSqliteIntegrity(dbPath) {
   const db = new sqlite3.Database(dbPath);
   try {
@@ -1131,6 +1378,11 @@ async function writeSqliteIntegrity(dbPath) {
 }
 
 function renderReportMarkdown(currentReport) {
+  const providerLabels = {
+    chatgpt: "ChatGPT",
+    claude: "Claude",
+    gemini: "Gemini",
+  };
   const lines = [
     `# Polychat History Verification`,
     ``,
@@ -1154,8 +1406,18 @@ function renderReportMarkdown(currentReport) {
     const live = currentReport.live.browserExtensionSmoke;
     lines.push(``);
     lines.push(`## Live Smoke`);
-    lines.push(`- browser extension smoke: ${live.status}`);
+    lines.push(`- overall status: ${live.status}`);
     if (live.reason) lines.push(`- reason: ${live.reason}`);
+    for (const providerName of ["chatgpt", "claude", "gemini"]) {
+      const provider = live.providers?.[providerName];
+      if (!provider) continue;
+      lines.push(
+        `- ${providerLabels[providerName]}: ${provider.status}, messages ${provider.messages}, search hit ${provider.searchHit}`
+      );
+      if (provider.reason) {
+        lines.push(`- ${providerLabels[providerName]} reason: ${provider.reason}`);
+      }
+    }
   }
 
   lines.push(``);
@@ -1169,91 +1431,4 @@ function renderReportMarkdown(currentReport) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function finalizeJsonRpcError(message, error) {
-  return new Error(`${message}: ${formatError(error)}`);
-}
-
-class JsonRpcClient {
-  constructor(process) {
-    this.process = process;
-    this.id = 1;
-    this.pending = new Map();
-    debugLog("rpc ctor buffer");
-    this.buffer = "";
-    debugLog("rpc ctor encoding");
-    this.process.stdout.setEncoding("utf8");
-    debugLog("rpc ctor data listener");
-    this.process.stdout.on("data", (chunk) => {
-      this.buffer += chunk;
-      let newlineIndex = this.buffer.indexOf("\n");
-      while (newlineIndex !== -1) {
-        const line = this.buffer.slice(0, newlineIndex);
-        this.buffer = this.buffer.slice(newlineIndex + 1);
-        this.handleLine(line);
-        newlineIndex = this.buffer.indexOf("\n");
-      }
-    });
-    debugLog("rpc ctor exit listener");
-    this.process.once("exit", (code, signal) => {
-      const tail = this.buffer.trim();
-      if (tail) {
-        this.handleLine(tail);
-      }
-      if (code === 0) return;
-      const error = new Error(`mcp process exited with code ${code ?? "null"} signal ${signal ?? "null"}`);
-      for (const pending of this.pending.values()) {
-        pending.reject(error);
-      }
-      this.pending.clear();
-    });
-  }
-
-  handleLine(line) {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let payload;
-    try {
-      payload = JSON.parse(trimmed);
-    } catch {
-      return;
-    }
-    if (!Object.prototype.hasOwnProperty.call(payload, "id")) {
-      return;
-    }
-    const pending = this.pending.get(payload.id);
-    if (!pending) return;
-    this.pending.delete(payload.id);
-    if (payload.error) {
-      pending.reject(new Error(payload.error.message || "JSON-RPC error"));
-      return;
-    }
-    pending.resolve(payload.result);
-  }
-
-  request(method, params) {
-    const id = this.id++;
-    const payload = { jsonrpc: "2.0", id, method, params };
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.process.stdin.write(`${JSON.stringify(payload)}\n`);
-    });
-  }
-
-  async initialize() {
-    const result = await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      clientInfo: { name: "polychat-history-verifier", version: "1.0.0" },
-      capabilities: { tools: {}, resources: {} },
-    });
-    this.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
-    return result;
-  }
-
-  async callTool(name, args) {
-    const payload = await this.request("tools/call", { name, arguments: args });
-    const text = payload?.content?.[0]?.text ?? "{}";
-    return { ...payload, text, json: JSON.parse(text) };
-  }
 }
