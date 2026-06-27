@@ -127,6 +127,7 @@ mod tests {
     #[test]
     fn tracker_reuses_conversation_for_tool_result_follow_up() {
         let tracker = ConversationTracker::new();
+        let cwd = "/workspace/polychat";
         let first_turn = vec![msg("user", "What is the current working directory?")];
         tracker.store(&first_turn, "chatgpt", "conv-1".into());
 
@@ -135,7 +136,7 @@ mod tests {
             msg("assistant", "Tool call call_1: bash({\"command\":\"pwd\"})"),
             ChatMessage {
                 role: "tool".into(),
-                content: "/home/sohamb/Desktop/polychat".into(),
+                content: cwd.into(),
                 tool_call_id: Some("call_1".into()),
             },
         ];
@@ -149,12 +150,13 @@ mod tests {
     #[test]
     fn tracker_reuses_conversation_after_tool_result_on_next_user_turn() {
         let tracker = ConversationTracker::new();
+        let cwd = "/workspace/polychat";
         let tool_turn = vec![
             msg("user", "What is the current working directory?"),
             msg("assistant", "Tool call call_1: bash({\"command\":\"pwd\"})"),
             ChatMessage {
                 role: "tool".into(),
-                content: "/home/sohamb/Desktop/polychat".into(),
+                content: cwd.into(),
                 tool_call_id: Some("call_1".into()),
             },
         ];
@@ -165,12 +167,12 @@ mod tests {
             msg("assistant", "Tool call call_1: bash({\"command\":\"pwd\"})"),
             ChatMessage {
                 role: "tool".into(),
-                content: "/home/sohamb/Desktop/polychat".into(),
+                content: cwd.into(),
                 tool_call_id: Some("call_1".into()),
             },
             msg(
                 "assistant",
-                "The current working directory is /home/sohamb/Desktop/polychat.",
+                "The current working directory is /workspace/polychat.",
             ),
             msg("user", "What Rust files are in this project?"),
         ];
@@ -184,6 +186,7 @@ mod tests {
     #[test]
     fn tracker_reuses_conversation_from_initial_tool_call_on_follow_up_user_turn() {
         let tracker = ConversationTracker::new();
+        let cwd = "/workspace/polychat";
         let first_turn = vec![msg("user", "What is the current working directory?")];
         tracker.store(&first_turn, "chatgpt", "conv-1".into());
 
@@ -192,7 +195,7 @@ mod tests {
             msg("assistant", "Tool call call_1: bash({\"command\":\"pwd\"})"),
             ChatMessage {
                 role: "tool".into(),
-                content: "/home/sohamb/Desktop/polychat".into(),
+                content: cwd.into(),
                 tool_call_id: Some("call_1".into()),
             },
             msg("user", "What kind of project is this?"),

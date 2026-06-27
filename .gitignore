@@ -11,3 +11,4 @@ apps/mcp/data/
 bin/*/polychat-server
 bin/*/polychat-server.exe
 docs/plans/
+docs/webui-assets/webui-live-*

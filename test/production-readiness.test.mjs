@@ -111,4 +111,11 @@ describe("Production readiness", () => {
     assert.match(src, /Security/);
     assert.match(src, /OpenAI-compatible/);
   });
+
+  it("generated WebUI evidence outputs stay ignored and checkout paths stay out of tests", () => {
+    const gitignore = read(".gitignore");
+    const tracker = read("rust/server/src/routes/conversation_tracker.rs");
+    assert.match(gitignore, /docs\/webui-assets\/webui-live-\*/);
+    assert.doesNotMatch(tracker, /\/home\/sohamb\/Desktop\/polychat/);
+  });
 });

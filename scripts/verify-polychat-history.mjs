@@ -15,6 +15,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import net from "node:net";
 import sqlite3 from "node-sqlite3-wasm";
 
+import {
+  buildLiveProviderPlansFromEnv as buildLiveProviderPlansFromEnvCore,
+  finalizeLiveProviderReport as finalizeLiveProviderReportCore,
+  summarizeLiveSmokeReason as summarizeLiveSmokeReasonCore,
+  summarizeLiveSmokeStatus as summarizeLiveSmokeStatusCore,
+} from "./verify-polychat-history-live.mjs";
+
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const artifactsDir = join(root, "artifacts", "polychat-history-verification");
 const artifactPaths = {
@@ -957,15 +964,15 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint, liveProviderChecks 
         },
         searchConversations: {
           passed: true,
-          query: "TCP/UDP foo:bar \\"quoted phrase\\" (parentheses)",
           conversationId: searchJson.results[0].conversation.id,
           rawIncluded: false,
+          searchHit: true,
         },
         searchConversationsWithRaw: {
           passed: true,
-          query: "TCP/UDP foo:bar \\"quoted phrase\\" (parentheses)",
           conversationId: searchRawJson.results[0].conversation.id,
           rawIncluded: true,
+          searchHit: true,
         },
         getConversation: {
           passed: true,
@@ -1113,54 +1120,7 @@ async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot,
 }
 
 function buildLiveProviderPlans() {
-  return [
-    buildLiveProviderPlan(
-      "chatgpt",
-      process.env.POLYCHAT_TEST_CHATGPT_CONVERSATION_ID?.trim() || "",
-      process.env.POLYCHAT_TEST_CHATGPT_SEARCH_PHRASE?.trim() || ""
-    ),
-    buildLiveProviderPlan(
-      "claude",
-      process.env.POLYCHAT_TEST_CLAUDE_CONVERSATION_ID?.trim() || "",
-      process.env.POLYCHAT_TEST_CLAUDE_SEARCH_PHRASE?.trim() || ""
-    ),
-    buildLiveProviderPlan(
-      "gemini",
-      process.env.POLYCHAT_TEST_GEMINI_CONVERSATION_ID?.trim() || "",
-      process.env.POLYCHAT_TEST_GEMINI_SEARCH_PHRASE?.trim() || ""
-    ),
-  ];
-}
-
-function buildLiveProviderPlan(provider, conversationId, searchPhrase) {
-  const base = {
-    provider,
-    conversationId: conversationId || null,
-    messages: 0,
-    mcpGetConversation: false,
-    mcpGetMessages: false,
-    searchHit: false,
-    rawHiddenByDefault: false,
-    status: "skipped",
-    reason: "not configured",
-  };
-
-  if (!conversationId && !searchPhrase) {
-    return base;
-  }
-  if (!conversationId || !searchPhrase) {
-    return {
-      ...base,
-      status: "failed",
-      reason: conversationId ? "missing search phrase" : "missing conversation id",
-    };
-  }
-  return {
-    ...base,
-    status: "configured",
-    reason: null,
-    searchPhrase,
-  };
+  return buildLiveProviderPlansFromEnvCore(process.env);
 }
 
 async function buildTestModeExtension() {
@@ -1261,63 +1221,15 @@ function readConversationMessageCountFromDb(dbPath, provider, conversationId) {
 }
 
 function finalizeLiveProviderReport(provider) {
-  if (!provider) {
-    return {
-      status: "skipped",
-      reason: "not configured",
-      conversationId: null,
-      messages: 0,
-      mcpGetConversation: false,
-      mcpGetMessages: false,
-      searchHit: false,
-      rawHiddenByDefault: false,
-    };
-  }
-
-  return {
-    status: provider.status === "configured" ? "failed" : provider.status,
-    reason:
-      provider.status === "configured"
-        ? "live provider verification was not completed"
-        : provider.reason,
-    conversationId: provider.conversationId,
-    messages: provider.messages,
-    mcpGetConversation: provider.mcpGetConversation,
-    mcpGetMessages: provider.mcpGetMessages,
-    searchHit: provider.searchHit,
-    rawHiddenByDefault: provider.rawHiddenByDefault,
-  };
+  return finalizeLiveProviderReportCore(provider);
 }
 
 function summarizeLiveSmokeStatus(providerPlans) {
-  const statuses = providerPlans.map((provider) => (provider.status === "configured" ? "failed" : provider.status));
-  if (statuses.some((status) => status === "failed")) return "failed";
-  if (statuses.every((status) => status === "skipped")) return "skipped";
-  if (statuses.some((status) => status === "skipped")) return "partial";
-  return "passed";
+  return summarizeLiveSmokeStatusCore(providerPlans);
 }
 
 function summarizeLiveSmokeReason(providerPlans) {
-  const failedReasons = providerPlans
-    .filter((provider) => provider.status === "failed")
-    .map((provider) => `${provider.provider}: ${provider.reason}`)
-    .filter(Boolean);
-  if (failedReasons.length > 0) {
-    return failedReasons.join("; ");
-  }
-  const configured = providerPlans.filter((provider) => provider.status === "configured");
-  if (configured.length > 0) {
-    return "live provider verification was not completed";
-  }
-  const activeOrSkipped = providerPlans.filter((provider) => provider.status !== "skipped");
-  if (activeOrSkipped.length === 0) {
-    return "live provider env vars not configured";
-  }
-  const skipped = providerPlans.filter((provider) => provider.status === "skipped").map((provider) => provider.provider);
-  if (skipped.length > 0) {
-    return `skipped providers: ${skipped.join(", ")}`;
-  }
-  return null;
+  return summarizeLiveSmokeReasonCore(providerPlans);
 }
 
 function sqliteQuote(value) {
@@ -1394,11 +1306,12 @@ function renderReportMarkdown(currentReport) {
   ];
 
   for (const [name, check] of Object.entries(currentReport.checks)) {
-    if (check?.passed === false) {
+    const status = typeof check?.status === "string" ? check.status : check?.passed === false ? "failed" : "passed";
+    if (status === "failed") {
       lines.push(`- ${name}: failed`);
       if (check.error) lines.push(`  - ${String(check.error).split("\n")[0]}`);
     } else {
-      lines.push(`- ${name}: passed`);
+      lines.push(`- ${name}: ${status}`);
     }
   }
 
@@ -1407,6 +1320,7 @@ function renderReportMarkdown(currentReport) {
     lines.push(``);
     lines.push(`## Live Smoke`);
     lines.push(`- overall status: ${live.status}`);
+    lines.push(`- live transcript sync proven: ${live.status === "passed" ? "yes" : live.status === "partial" ? "partial" : "no"}`);
     if (live.reason) lines.push(`- reason: ${live.reason}`);
     for (const providerName of ["chatgpt", "claude", "gemini"]) {
       const provider = live.providers?.[providerName];
