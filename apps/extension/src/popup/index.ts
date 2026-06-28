@@ -1,13 +1,11 @@
-import {
-  parseConversation,
-  type IngestRequest,
-  type ProviderId,
-  type ProviderAdapter,
-} from "@polychat-ai/history-core/browser";
-
 import { loadSettings, saveSettings } from "../config.js";
-import { getSyncStatus, postBatch, postConversation } from "../ingest-client.js";
-import { PROVIDER_ADAPTERS } from "../providers/registry.js";
+import { getSyncStatus } from "../ingest-client.js";
+import {
+  syncAll as syncAllProviders,
+  syncConversation as syncConversationWithCache,
+  syncProvider as syncProviderWithCache,
+  type SyncResult,
+} from "../sync.js";
 import { permissionsRequest } from "../webext.js";
 
 const serverUrlInput = document.getElementById("serverUrl") as HTMLInputElement | null;
@@ -31,46 +29,7 @@ const result = document.getElementById("result");
 const serverStatus = document.getElementById("serverStatus");
 const autoTestParams = new URLSearchParams(location.search);
 const AUTO_TEST_PARAM = ["auto", "test"].join("");
-
-type SyncResult = {
-  ok: true;
-  count: number;
-  errors?: string[];
-} | {
-  ok: false;
-  error: string;
-};
-
-type ConversationDetail = Awaited<ReturnType<ProviderAdapter["getConversation"]>>;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isRetryableDetailError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b(408|409|425|429|500|502|503|504)\b/.test(message);
-}
-
-function retryDelayMs(error: unknown, attempt: number): number {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/\b429\b/.test(message)) return 8_000 * attempt;
-  return 1_500 * attempt;
-}
-
-async function getConversationWithRetry(adapter: ProviderAdapter, id: string): Promise<ConversationDetail> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
-    try {
-      return await adapter.getConversation(id);
-    } catch (error) {
-      lastError = error;
-      if (attempt === 4 || !isRetryableDetailError(error)) break;
-      await sleep(retryDelayMs(error, attempt));
-    }
-  }
-  throw lastError;
-}
+type ProviderId = "chatgpt" | "claude" | "gemini";
 
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -79,6 +38,7 @@ function isLoopbackHostname(hostname: string): boolean {
 function serverOriginPattern(serverUrl: string): string | null {
   const url = new URL(serverUrl);
   if (url.protocol !== "https:" || isLoopbackHostname(url.hostname)) return null;
+  if (url.hostname === "polychat.astatide.com") return null;
   return `${url.protocol}//${url.host}/*`;
 }
 
@@ -137,55 +97,7 @@ async function syncProvider(provider: ProviderId): Promise<SyncResult> {
   try {
     const settings = await loadSettings();
     await ensureServerPermission(settings.serverUrl);
-    const adapter = PROVIDER_ADAPTERS[provider];
-    const conversations = await adapter.listConversations();
-    const summaryBatch: IngestRequest[] = conversations.map((summary) => ({
-      conversation: parseConversation({
-        id: summary.id,
-        provider,
-        title: summary.title,
-        url: summary.url,
-        model: summary.model,
-        createdAt: summary.createdAt,
-        updatedAt: summary.updatedAt,
-        lastSyncedAt: new Date().toISOString(),
-        raw: summary.raw,
-      }),
-      messages: [],
-      replaceMessages: false,
-    }));
-    if (summaryBatch.length > 0) {
-      await postBatch({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, summaryBatch);
-    }
-
-    const batch: IngestRequest[] = [];
-    const errors: string[] = [];
-
-    for (const summary of conversations) {
-      try {
-        if (provider === "chatgpt") await sleep(750);
-        const detail = await getConversationWithRetry(adapter, summary.id);
-        batch.push({
-          conversation: detail.conversation,
-          messages: detail.messages,
-          replaceMessages: true,
-        });
-      } catch (error) {
-        errors.push(`${summary.id}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    if (batch.length > 0) {
-      await postBatch({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, batch);
-    }
-    const maybeTruncated = provider === "claude" && conversations.length === 100;
-    await saveSettings({
-      lastSyncAt: new Date().toISOString(),
-      lastResult: errors.length
-        ? `Synced ${conversations.length} ${provider} conversations with ${errors.length} detail errors.${maybeTruncated ? " Provider may be truncated." : ""}`
-        : `Synced ${conversations.length} ${provider} conversations.${maybeTruncated ? " Provider may be truncated." : ""}`,
-    });
-    return errors.length ? { ok: true, count: conversations.length, errors } : { ok: true, count: conversations.length };
+    return await syncProviderWithCache(provider);
   } catch (error) {
     await saveSettings({
       lastSyncAt: new Date().toISOString(),
@@ -196,30 +108,17 @@ async function syncProvider(provider: ProviderId): Promise<SyncResult> {
 }
 
 async function syncAll(): Promise<SyncResult> {
-  let count = 0;
-  const errors: string[] = [];
-  for (const provider of ["chatgpt", "claude", "gemini"] as ProviderId[]) {
-    try {
-      const response = await syncProvider(provider);
-      if (response.ok) {
-        count += response.count;
-        if (response.errors) {
-          errors.push(...response.errors.map((error) => `${provider}: ${error}`));
-        }
-      } else {
-        errors.push(`${provider}: ${response.error}`);
-      }
-    } catch (error) {
-      errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  try {
+    const settings = await loadSettings();
+    await ensureServerPermission(settings.serverUrl);
+    return await syncAllProviders();
+  } catch (error) {
+    await saveSettings({
+      lastSyncAt: new Date().toISOString(),
+      lastResult: `Sync failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  await saveSettings({
-    lastSyncAt: new Date().toISOString(),
-    lastResult: errors.length
-      ? `Synced ${count} conversations with errors: ${errors.join("; ")}`
-      : `Synced ${count} conversations across providers.`,
-  });
-  return errors.length ? { ok: true, count, errors } : { ok: true, count };
 }
 
 async function sync(type: "polychat-ai:sync-provider" | "polychat-ai:sync-all", provider?: string) {
@@ -238,20 +137,10 @@ async function syncConversation() {
   }
   setText(result, "Syncing conversation...");
   try {
-    const typedProvider = provider as ProviderId;
     const settings = await loadSettings();
     await ensureServerPermission(settings.serverUrl);
-    const detail = await getConversationWithRetry(PROVIDER_ADAPTERS[typedProvider], conversationId);
-    await postConversation({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, {
-      conversation: detail.conversation,
-      messages: detail.messages,
-      replaceMessages: true,
-    });
-    await saveSettings({
-      lastSyncAt: new Date().toISOString(),
-      lastResult: `Synced ${typedProvider} conversation ${conversationId}.`,
-    });
-    setText(result, JSON.stringify({ ok: true, count: 1 }, null, 2));
+    const response = await syncConversationWithCache(provider as ProviderId, conversationId);
+    setText(result, JSON.stringify(response, null, 2));
   } catch (error) {
     await saveSettings({
       lastSyncAt: new Date().toISOString(),
@@ -277,17 +166,7 @@ async function syncTestConversation(provider: "chatgpt" | "claude" | "gemini") {
       return;
     }
     console.info(`[polychat-ai] syncing test conversation`, { provider, conversationId });
-    const detail = await getConversationWithRetry(PROVIDER_ADAPTERS[provider], conversationId);
-    await postConversation({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, {
-      conversation: detail.conversation,
-      messages: detail.messages,
-      replaceMessages: true,
-    });
-    const response = { ok: true, count: 1 };
-    await saveSettings({
-      lastSyncAt: new Date().toISOString(),
-      lastResult: `Synced ${provider} test conversation ${conversationId}.`,
-    });
+    const response = await syncConversationWithCache(provider, conversationId);
     console.info(`[polychat-ai] sync response`, { provider, response });
     setText(result, JSON.stringify(response, null, 2));
   } catch (error) {
@@ -315,17 +194,17 @@ async function runAutoTest(): Promise<void> {
     },
   });
   if (autoTestParams.get("all") === "1") {
-    await sync("polychat-ai:sync-all");
+    await syncAllProviders();
     return;
   }
   if (autoTestParams.get("chatgpt")) {
-    await syncTestConversation("chatgpt");
+    await syncConversationWithCache("chatgpt", autoTestParams.get("chatgpt") || "");
   }
   if (autoTestParams.get("claude")) {
-    await syncTestConversation("claude");
+    await syncConversationWithCache("claude", autoTestParams.get("claude") || "");
   }
   if (autoTestParams.get("gemini")) {
-    await syncTestConversation("gemini");
+    await syncConversationWithCache("gemini", autoTestParams.get("gemini") || "");
   }
 }
 

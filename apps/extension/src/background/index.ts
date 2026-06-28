@@ -1,23 +1,15 @@
-import {
-  parseConversation,
-  parseMessage,
-  type Conversation,
-  type IngestRequest,
-  type Message,
-  type ProviderId,
-  type ProviderAdapter,
-} from "@polychat-ai/history-core/browser";
-
 import { loadSettings, saveSettings, type ExtensionSettings } from "../config.js";
-import { getHealth, postBatch, postConversation } from "../ingest-client.js";
-import { PROVIDER_ADAPTERS } from "../providers/registry.js";
+import { getHealth } from "../ingest-client.js";
+import {
+  syncAll as syncAllProviders,
+  syncConversation as syncConversationWithCache,
+  syncProvider as syncProviderWithCache,
+  syncSnapshot as syncSnapshotWithCache,
+  type SyncResult,
+} from "../sync.js";
 import { tabsQuery, tabsSendMessage } from "../webext.js";
 
-type SyncResult =
-  | { ok: true; count: number; errors?: string[] }
-  | { ok: false; error: string };
-type ConversationDetail = Awaited<ReturnType<ProviderAdapter["getConversation"]>>;
-type SyncSuccess = Extract<SyncResult, { ok: true }>;
+type ProviderId = "chatgpt" | "claude" | "gemini";
 
 const AUTO_INGEST_DEBOUNCE_MS = 30_000;
 const E2E_SCAN_ATTEMPTS = 20;
@@ -31,42 +23,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRetryableDetailError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b(408|409|425|429|500|502|503|504)\b/.test(message);
-}
-
-function retryDelayMs(error: unknown, attempt: number): number {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/\b429\b/.test(message)) return 8_000 * attempt;
-  return 1_500 * attempt;
-}
-
-function isSyncSuccess(result: SyncResult): result is SyncSuccess {
+function isSyncSuccess(result: SyncResult): result is Extract<SyncResult, { ok: true }> {
   return result.ok;
 }
 
 function formatSyncResult(result: SyncResult, prefix: string): string {
-  if (isSyncSuccess(result)) {
-    return result.errors?.length
-      ? `${prefix} synced ${result.count} conversations with errors: ${result.errors.join("; ")}`
-      : `${prefix} synced ${result.count} conversations across providers.`;
+  if (!isSyncSuccess(result)) {
+    return `${prefix} sync failed: ${result.error}`;
   }
-  return `${prefix} sync failed: ${result.error}`;
+  const parts = [`${prefix} synced ${result.count} conversations`];
+  if (result.skipped > 0) {
+    parts.push(`skipped ${result.skipped} unchanged`);
+  }
+  if (result.errors?.length) {
+    parts.push(`with errors: ${result.errors.join("; ")}`);
+  }
+  return `${parts.join(", ")}.`;
 }
 
-async function getConversationWithRetry(adapter: ProviderAdapter, id: string): Promise<ConversationDetail> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
-    try {
-      return await adapter.getConversation(id);
-    } catch (error) {
-      lastError = error;
-      if (attempt === 4 || !isRetryableDetailError(error)) break;
-      await sleep(retryDelayMs(error, attempt));
-    }
-  }
-  throw lastError;
+async function syncProvider(provider: ProviderId): Promise<SyncResult> {
+  return syncProviderWithCache(provider);
+}
+
+async function syncConversation(provider: ProviderId, conversationId: string): Promise<SyncResult> {
+  return syncConversationWithCache(provider, conversationId);
+}
+
+async function syncAll(): Promise<SyncResult> {
+  return syncAllProviders();
+}
+
+async function syncSnapshot(provider: ProviderId, snapshot: any, serverUrl: string, ingestToken: string) {
+  return syncSnapshotWithCache(provider, snapshot, serverUrl, ingestToken);
 }
 
 function getE2EParamsFromUrl(url: string): URLSearchParams | null {
@@ -112,21 +100,62 @@ async function syncE2EConversationIds(params: URLSearchParams): Promise<SyncResu
 
     const errors: string[] = [];
     let count = 0;
+    let skipped = 0;
+    let detailFetched = 0;
+    let messagesPosted = 0;
     for (const { provider, conversationId } of conversationIds) {
       try {
         console.info("[polychat-ai] e2e syncing designated conversation", { provider, conversationId });
         const result = await syncConversation(provider, conversationId);
-        if (result.ok) count += result.count;
+        if (result.ok) {
+          count += result.count;
+          skipped += result.skipped;
+          detailFetched += result.detailFetched;
+          messagesPosted += result.messagesPosted;
+          if (result.errors?.length) {
+            errors.push(...result.errors.map((error) => `${provider}: ${error}`));
+          }
+        }
       } catch (error) {
         errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    const result: SyncResult = errors.length > 0 ? { ok: true, count, errors } : { ok: true, count };
+    const result: SyncResult = errors.length > 0
+      ? { ok: true, count, skipped, detailFetched, messagesPosted, errors }
+      : { ok: true, count, skipped, detailFetched, messagesPosted };
     await saveSettings({
       lastSyncAt: new Date().toISOString(),
       lastResult: formatSyncResult(result, "E2E"),
     });
+    if (process.env.POLYCHAT_EXTENSION_TEST_MODE && params.get("cacheProbe") === "1") {
+      try {
+        await syncSnapshotWithCache(
+          "gemini",
+          {
+            conversationId: "polychat-cache-probe",
+            title: "Polychat cache probe",
+            url: "polychat-cache-probe://result",
+            messages: [
+              {
+                role: "assistant",
+                content: formatSyncResult(result, "E2E"),
+              },
+            ],
+            raw: {
+              kind: "cache-probe",
+              result,
+            },
+          },
+          settings.serverUrl,
+          settings.ingestToken
+        );
+      } catch (error) {
+        console.error("[polychat-ai] cache probe snapshot failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return result;
   })();
   try {
@@ -142,6 +171,11 @@ async function maybeRunE2ESyncFromUrl(url: string, source: string): Promise<bool
   console.info("[polychat-ai] e2e trigger found", { source, url });
   const result = await syncE2EConversationIds(params);
   console.info("[polychat-ai] e2e sync result", result);
+  if (params.get("cacheProbe") === "1") {
+    console.info("[polychat-ai] e2e cache probe rerun starting", { source, url });
+    const cachedResult = await syncE2EConversationIds(params);
+    console.info("[polychat-ai] e2e cache probe rerun result", cachedResult);
+  }
   return true;
 }
 
@@ -178,7 +212,7 @@ async function retryE2ESyncFromOpenTabs(source: string): Promise<void> {
 if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
   void retryE2ESyncFromOpenTabs("boot");
   chrome.tabs.onUpdated.addListener((_tabId: number, changeInfo: { url?: string; status?: string }, tab: { url?: string }) => {
-    const url = typeof changeInfo.url === "string" ? changeInfo.url : typeof tab.url === "string" ? tab.url : "";
+    const url = typeof changeInfo.url === "string" ? changeInfo.url : typeof tab?.url === "string" ? tab.url : "";
     if (!url) return;
     if (changeInfo.status !== "complete" && !changeInfo.url) return;
     void maybeRunE2ESyncFromUrl(url, `updated:${changeInfo.status ?? "unknown"}`);
@@ -205,135 +239,6 @@ function rememberAutoIngest(provider: string, conversationId: string | null, url
     }
   }
   return true;
-}
-
-async function syncSnapshot(provider: ProviderId, snapshot: any, serverUrl: string, ingestToken: string): Promise<IngestRequest> {
-  const conversation = parseConversation({
-    id: snapshot.conversationId ?? snapshot.url ?? crypto.randomUUID(),
-    provider,
-    title: snapshot.title ?? null,
-    url: snapshot.url ?? null,
-    model: null,
-    createdAt: null,
-    updatedAt: new Date().toISOString(),
-    lastSyncedAt: new Date().toISOString(),
-    raw: snapshot.raw ?? snapshot,
-  });
-  const messages: Message[] = Array.isArray(snapshot.messages)
-    ? snapshot.messages.map((message: any, index: number) =>
-        parseMessage({
-          id: message.id ?? `${conversation.id}:${index}`,
-          provider,
-          conversationId: conversation.id,
-          role: message.role ?? "unknown",
-          content: message.content ?? "",
-          model: null,
-          parentId: message.parentId ?? null,
-          nodeId: message.nodeId ?? null,
-          createdAt: null,
-          updatedAt: null,
-          raw: message.raw ?? message,
-        })
-      )
-    : [];
-  const request: IngestRequest = { conversation, messages };
-  if (messages.length > 0) {
-    request.replaceMessages = true;
-  } else {
-    request.replaceMessages = false;
-  }
-  await postConversation({ serverUrl, ingestToken }, request);
-  return request;
-}
-
-async function syncProvider(provider: ProviderId): Promise<SyncResult> {
-  const settings = await loadSettings();
-  const adapter = PROVIDER_ADAPTERS[provider];
-  const conversations = await adapter.listConversations().catch((error: Error) => {
-    throw new Error(`${provider} list failed: ${error.message}`);
-  });
-
-  if (conversations.length === 0) {
-    await saveSettings({ lastSyncAt: new Date().toISOString(), lastResult: `No ${provider} conversations found.` });
-    return { ok: true, count: 0 };
-  }
-
-  const batch: IngestRequest[] = [];
-  for (const summary of conversations) {
-    try {
-      if (provider === "chatgpt") await sleep(750);
-      const detail = await getConversationWithRetry(adapter, summary.id);
-      batch.push({
-        conversation: detail.conversation,
-        messages: detail.messages,
-        replaceMessages: true,
-      });
-    } catch (error) {
-      batch.push({
-        conversation: parseConversation({
-          id: summary.id,
-          provider,
-          title: summary.title,
-          url: summary.url,
-          model: summary.model,
-          createdAt: summary.createdAt,
-          updatedAt: summary.updatedAt,
-          lastSyncedAt: new Date().toISOString(),
-          raw: summary.raw,
-        }),
-        messages: [],
-        replaceMessages: false,
-      });
-      await saveSettings({
-        lastResult: `${provider} detail fetch failed for ${summary.id}: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-  }
-
-  await postBatch({ serverUrl: settings.serverUrl, ingestToken: settings.ingestToken }, batch);
-  const maybeTruncated = provider === "claude" && conversations.length === 100;
-  await saveSettings({
-    lastSyncAt: new Date().toISOString(),
-    lastResult: `Synced ${batch.length} ${provider} conversations.${maybeTruncated ? " Provider may be truncated." : ""}`,
-  });
-  return { ok: true, count: batch.length };
-}
-
-async function syncConversation(provider: ProviderId, conversationId: string): Promise<SyncResult> {
-  if (!conversationId.trim()) {
-    throw new Error("conversation id required");
-  }
-  const settings = await loadSettings();
-  const adapter = PROVIDER_ADAPTERS[provider];
-  const detail = await getConversationWithRetry(adapter, conversationId);
-  await postConversation(
-    { serverUrl: settings.serverUrl, ingestToken: settings.ingestToken },
-    {
-      conversation: detail.conversation,
-      messages: detail.messages,
-      replaceMessages: true,
-    }
-  );
-  await saveSettings({
-    lastSyncAt: new Date().toISOString(),
-    lastResult: `Synced ${provider} conversation ${conversationId}.`,
-  });
-  return { ok: true, count: 1 };
-}
-
-async function syncAll(): Promise<SyncResult> {
-  let count = 0;
-  const errors: string[] = [];
-  for (const provider of ["chatgpt", "claude", "gemini"] as ProviderId[]) {
-    try {
-      const result = await syncProvider(provider);
-      if (result.ok) count += result.count;
-      else errors.push(`${provider}: ${result.error}`);
-    } catch (error) {
-      errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return errors.length > 0 ? { ok: true, count, errors } : { ok: true, count };
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: number } } | undefined, sendResponse: (value: unknown) => void) => {
@@ -390,16 +295,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
       const url = typeof pageReady.url === "string" ? pageReady.url : null;
       if (!url || url.includes("polychat-auto")) return;
       if (process.env.POLYCHAT_EXTENSION_TEST_MODE) {
-        const e2eParams = getE2EParamsFromUrl(url);
-        if (e2eParams) {
-          try {
-            await syncE2EConversationIds(e2eParams);
-          } catch (error) {
-            await saveSettings({
-              lastSyncAt: new Date().toISOString(),
-              lastResult: `E2E sync failed: ${error instanceof Error ? error.message : String(error)}`,
-            });
-          }
+        try {
+          if (await maybeRunE2ESyncFromUrl(url, "page-ready")) return;
+        } catch (error) {
+          await saveSettings({
+            lastSyncAt: new Date().toISOString(),
+            lastResult: `E2E sync failed: ${error instanceof Error ? error.message : String(error)}`,
+          });
           return;
         }
       }

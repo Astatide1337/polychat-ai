@@ -10,6 +10,7 @@
     "https://chatgpt.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*",
+    "https://polychat.astatide.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
