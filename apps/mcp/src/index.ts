@@ -73,9 +73,9 @@ async function main() {
             ok(request.id, {
               tools: [
                 {
-                  name: "list_conversations",
+                  name: "list_polychat_conversations",
                   description: "Browse synced conversation history. Returns paginated list of conversations across ChatGPT, Claude, or Gemini with titles, models, and timestamps. Use provider filter to narrow by source, cursor for pagination.",
-                  annotations: { title: "List conversations", readOnlyHint: true },
+                  annotations: { title: "List Polychat conversations", readOnlyHint: true },
                   inputSchema: {
                     type: "object",
                     properties: {
@@ -165,7 +165,7 @@ async function main() {
           const args = input.arguments ?? {};
           const provider = parseProvider(args.provider);
           const result =
-            name === "list_conversations"
+            name === "list_polychat_conversations"
               ? listConversationsTool(db, {
                   provider,
                   limit: typeof args.limit === "number" ? args.limit : undefined,
