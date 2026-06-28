@@ -153,6 +153,16 @@ function planConversationSync(
     }
   }
 
+  if (
+    cached &&
+    currentMessages.length > 0 &&
+    currentMessages.length === cached.messageCount &&
+    cached.summaryUpdatedAt !== syncVersion
+  ) {
+    messagesToSend = currentMessages;
+    replaceMessages = true;
+  }
+
   const conversationNeedsUpsert =
     !cached ||
     cached.summaryUpdatedAt !== syncVersion ||
