@@ -1040,6 +1040,7 @@ async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot,
       const url = new URL("/health", baseUrl);
       url.search = new URLSearchParams({
         "polychat-e2e": "all",
+        cacheProbe: "1",
         serverUrl: baseUrl,
         ingestToken,
         chatgpt: configuredProviders.find((provider) => provider.provider === "chatgpt")?.conversationId ?? "",
@@ -1053,6 +1054,8 @@ async function maybeRunLiveBrowserSmoke({ baseUrl, ingestToken, dbPath, mcpRoot,
       });
       browserLaunched = true;
       const providerSyncs = await waitForLiveProviderSyncs(dbPath, configuredProviders);
+      const cacheProbe = await waitForCacheProbeResult(dbPath);
+      report.checks.browserExtensionCacheProbe = cacheProbe;
       for (const sync of providerSyncs) {
         const result = providerPlans.find((provider) => provider.provider === sync.provider);
         if (!result) continue;
@@ -1251,6 +1254,51 @@ async function waitForLiveProviderSyncs(dbPath, providers, { timeoutMs = 90_000,
         : `conversation ${provider.provider}:${provider.conversationId} never appeared in SQLite`,
     };
   });
+}
+
+async function waitForCacheProbeResult(dbPath, { timeoutMs = 60_000, intervalMs = 2_000 } = {}) {
+  const expectedPattern = /^E2E synced 0 conversations, skipped \d+ unchanged\.$/;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const probe = readCacheProbeFromDb(dbPath);
+      if (probe && typeof probe.content === "string" && expectedPattern.test(probe.content.trim())) {
+        return {
+          passed: true,
+          expectedPattern: expectedPattern.source,
+          conversationId: probe.conversationId,
+          messageCount: probe.messageCount,
+          content: probe.content,
+        };
+      }
+    } catch (error) {
+      if (!isRetryableSqliteError(error) && error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timed out waiting for cached provider sync result: ${expectedPattern.source}`);
+}
+
+function readCacheProbeFromDb(dbPath) {
+  const db = new sqlite3.Database(dbPath);
+  try {
+    const rows = db.all(`
+      SELECT conversations.id AS conversationId, COUNT(messages.id) AS messageCount, MAX(messages.content) AS content
+      FROM conversations
+      JOIN messages
+        ON messages.provider = conversations.provider
+       AND messages.conversation_id = conversations.id
+      WHERE conversations.provider = 'gemini'
+        AND conversations.id = 'polychat-cache-probe'
+      GROUP BY conversations.id
+      LIMIT 1;
+    `);
+    return rows[0] ?? null;
+  } finally {
+    db.close();
+  }
 }
 
 function readConversationExistsFromDb(dbPath, provider, conversationId) {
