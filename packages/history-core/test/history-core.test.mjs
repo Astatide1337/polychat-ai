@@ -157,6 +157,43 @@ test("normalizes chatgpt fixture", () => {
   assert.equal(normalized.messages[0].role, "user");
 });
 
+test("normalizes chatgpt wrapped conversation payloads", () => {
+  const raw = fixture("chatgpt-wrapped-conversation.json");
+  const normalized = normalizeChatgptConversation(raw);
+  assert.equal(normalized.conversation.id, "chatgpt-conv-wrapped");
+  assert.equal(normalized.conversation.provider, "chatgpt");
+  assert.equal(normalized.messages.length, 2);
+  assert.equal(normalized.messages[1].role, "assistant");
+});
+
+test("normalizes chatgpt flat messages fallback", () => {
+  const normalized = normalizeChatgptConversation({
+    id: "chatgpt-flat-messages",
+    title: "Flat messages",
+    url: "https://chatgpt.com/c/chatgpt-flat-messages",
+    current_node: "assistant-1",
+    model: "gpt-5-mini",
+    messages: [
+      {
+        id: "msg-user-1",
+        author: { role: "user" },
+        content: { parts: ["Explain the difference between TCP and UDP."] },
+        create_time: "2026-06-24T17:00:01.000Z",
+      },
+      {
+        id: "msg-assistant-1",
+        author: { role: "assistant" },
+        content: { parts: ["TCP is connection-oriented while UDP is connectionless."] },
+        create_time: "2026-06-24T17:00:05.000Z",
+      },
+    ],
+  });
+  assert.equal(normalized.conversation.id, "chatgpt-flat-messages");
+  assert.equal(normalized.messages.length, 2);
+  assert.equal(normalized.messages[0].role, "user");
+  assert.match(normalized.messages[1].content, /connectionless/);
+});
+
 test("normalizes chatgpt branch fixtures and keeps regenerated nodes", () => {
   const raw = fixture("chatgpt-branch-conversation.json");
   const normalized = normalizeChatgptConversation(raw);
