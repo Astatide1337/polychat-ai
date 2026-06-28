@@ -1,0 +1,35 @@
+FROM node:22-alpine AS build
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/mcp/package.json apps/mcp/
+COPY packages/history-core/package.json packages/history-core/
+RUN npm ci --ignore-scripts
+
+COPY tsconfig.json tsup.config.ts ./
+COPY apps/mcp/ apps/mcp/
+COPY packages/history-core/ packages/history-core/
+
+RUN npm --workspace packages/history-core run build
+RUN npm --workspace apps/mcp run build
+
+FROM node:22-alpine
+
+ARG UID=1000
+ARG GID=1000
+
+RUN deluser node 2>/dev/null || true && \
+    addgroup -S -g ${GID} mcp && \
+    adduser -S -u ${UID} -G mcp mcp
+
+WORKDIR /app
+COPY --from=build /app/node_modules node_modules/
+COPY --from=build /app/packages/history-core/dist packages/history-core/dist/
+COPY --from=build /app/packages/history-core/package.json packages/history-core/package.json
+COPY --from=build /app/apps/mcp/dist apps/mcp/dist/
+COPY --from=build /app/apps/mcp/package.json apps/mcp/package.json
+COPY --from=build /app/apps/mcp/migrations apps/mcp/migrations/
+
+USER mcp
+
+CMD ["node", "apps/mcp/dist/index.js"]
