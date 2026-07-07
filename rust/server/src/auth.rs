@@ -16,16 +16,8 @@ pub async fn auth_middleware(req: Request<Body>, next: Next) -> Response {
         None => return next.run(req).await, // No API key configured → no auth
     };
 
-    // /health and static WebUI assets are intentionally public. API routes remain protected.
-    let path = req.uri().path();
-    let public_webui_get = req.method() == "GET"
-        && (path == "/"
-            || path.starts_with("/assets/")
-            || (!path.starts_with("/v1/")
-                && !path.starts_with("/api/")
-                && path != "/shutdown"
-                && !path.contains('.')));
-    if (req.method() == "GET" && path == "/health") || public_webui_get {
+    // /health is intentionally public. API routes remain protected.
+    if req.method() == "GET" && req.uri().path() == "/health" {
         return next.run(req).await;
     }
 

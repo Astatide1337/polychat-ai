@@ -8,6 +8,11 @@ const WIN = process.platform === "win32";
 const BIN = WIN ? `${BINARY_NAME}.exe` : BINARY_NAME;
 
 
+export function packageRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..");
+}
+
 function platformTriple(): string {
   const platform = process.platform;
   const arch = process.arch;
@@ -17,20 +22,6 @@ function platformTriple(): string {
   if (platform === "darwin" && arch === "x64") return "darwin-x64";
   if (platform === "win32" && arch === "x64") return "win32-x64";
   return `${platform}-${arch}`;
-}
-export function packageRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..");
-}
-
-export function resolveWebDist(): string | null {
-  const packaged = join(packageRoot(), "web-dist");
-  if (existsSync(join(packaged, "index.html"))) return packaged;
-
-  const local = join(process.cwd(), "web-dist");
-  if (existsSync(join(local, "index.html"))) return local;
-
-  return null;
 }
 
 function whichSync(name: string): string | null {
@@ -86,19 +77,4 @@ export async function isServerRunning(url: string, timeoutMs = 1500): Promise<bo
   }
 }
 
-export async function isWebUiAvailable(url: string, timeoutMs = 1500): Promise<boolean> {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return false;
 
-    const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/html")) return false;
-
-    const body = await res.text();
-    return body.includes("<!doctype html") || body.includes("<!DOCTYPE html");
-  } catch {
-    return false;
-  }
-}
