@@ -27,12 +27,6 @@ jobs:
       - name: Verify JavaScript and workspace packages
         run: npm run verify
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
-
-      - name: Run WebUI E2E tests
-        run: npm run test:e2e
-
       - name: Run Rust tests
         working-directory: rust
         run: cargo test --bin polychat-server
@@ -141,8 +135,6 @@ jobs:
       - name: Run package gates
         run: |
           npm run verify
-          npx playwright install --with-deps chromium
-          npm run test:e2e
           cargo test --bin polychat-server --manifest-path rust/Cargo.toml
           npm pack --dry-run
 

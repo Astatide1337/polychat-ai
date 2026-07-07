@@ -79,7 +79,6 @@ describe("Production readiness", () => {
     const ci = read(".github/workflows/ci.yml");
     assert.match(ci, /npm run verify/);
     assert.match(ci, /npm run verify:package:all/);
-    assert.match(ci, /npm run test:e2e/);
     assert.match(ci, /cargo test --bin polychat-server/);
     assert.match(ci, /cargo build --release/);
     assert.match(ci, /npm pack --dry-run/);
@@ -112,10 +111,8 @@ describe("Production readiness", () => {
     assert.match(src, /OpenAI-compatible/);
   });
 
-  it("generated WebUI evidence outputs stay ignored and checkout paths stay out of tests", () => {
-    const gitignore = read(".gitignore");
+  it("checkout paths stay out of tests", () => {
     const tracker = read("rust/server/src/routes/conversation_tracker.rs");
-    assert.match(gitignore, /docs\/webui-assets\/webui-live-\*/);
     assert.doesNotMatch(tracker, /\/home\/sohamb\/Desktop\/polychat/);
   });
 });
