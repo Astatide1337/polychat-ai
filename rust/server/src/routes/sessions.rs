@@ -26,12 +26,19 @@ struct PushRecord {
 static PUSH_RATES: std::sync::LazyLock<Mutex<HashMap<String, PushRecord>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-const PUSH_LIMIT: u32 = 5;
+const PUSH_LIMIT_PER_HOUR: u32 = 25;
 const PUSH_WINDOW_SECS: u64 = 3600;
 
 fn check_rate_limit(api_key: &str) -> bool {
     let mut rates = PUSH_RATES.lock().unwrap();
-    let now = Instant::now();
+    check_rate_limit_locked(api_key, &mut rates, Instant::now())
+}
+
+fn check_rate_limit_locked(
+    api_key: &str,
+    rates: &mut HashMap<String, PushRecord>,
+    now: Instant,
+) -> bool {
     let record = rates.get_mut(api_key);
     match record {
         Some(r) if now.duration_since(r.window_start).as_secs() > PUSH_WINDOW_SECS => {
@@ -39,7 +46,7 @@ fn check_rate_limit(api_key: &str) -> bool {
             r.window_start = now;
             true
         }
-        Some(r) if r.count >= PUSH_LIMIT => false,
+        Some(r) if r.count >= PUSH_LIMIT_PER_HOUR => false,
         Some(r) => {
             r.count += 1;
             true
@@ -99,7 +106,7 @@ pub async fn push_session_handler(
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({
                 "error": {
-                    "message": "Too many session pushes. Maximum 5 per hour.",
+                    "message": format!("Too many session pushes. Maximum {} per hour.", PUSH_LIMIT_PER_HOUR),
                     "type": "rate_limit_error",
                     "code": "session_push_rate_limited"
                 }
@@ -265,6 +272,40 @@ pub async fn push_session_handler(
             "message": format!("Session for \"{}\" stored successfully.", provider),
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn session_push_rate_limit_allows_up_to_the_cap() {
+        let api_key = "test-api-key";
+        let now = Instant::now();
+        let mut rates = HashMap::new();
+
+        for _ in 0..PUSH_LIMIT_PER_HOUR {
+            assert!(check_rate_limit_locked(api_key, &mut rates, now));
+        }
+
+        assert!(!check_rate_limit_locked(api_key, &mut rates, now));
+    }
+
+    #[test]
+    fn session_push_rate_limit_resets_after_the_window() {
+        let api_key = "test-api-key";
+        let now = Instant::now();
+        let later = now + Duration::from_secs(PUSH_WINDOW_SECS + 1);
+        let mut rates = HashMap::new();
+
+        assert!(check_rate_limit_locked(api_key, &mut rates, now));
+        assert!(check_rate_limit_locked(api_key, &mut rates, later));
+
+        let record = rates.get(api_key).expect("rate record should exist");
+        assert_eq!(record.count, 1);
+        assert_eq!(record.window_start, later);
+    }
 }
 
 pub async fn delete_session_handler(
