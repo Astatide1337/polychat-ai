@@ -87,12 +87,17 @@ describe("Production readiness", () => {
     const sessionRefresh = read("apps/extension/src/session-refresh.ts");
     const remote = read("apps/extension/src/remote.ts");
     const background = read("apps/extension/src/background/index.ts");
+    const popup = read("apps/extension/src/popup/index.ts");
+    const webext = read("apps/extension/src/webext.ts");
     const doc = read("docs/polychat-ai-extension.md");
     assert.match(sessionRefresh, /type RefreshableProvider = Extract<ProviderId, "chatgpt" \| "claude" \| "gemini">/);
     assert.match(sessionRefresh, /"https:\/\/chatgpt\.com\/"/);
     assert.match(sessionRefresh, /"https:\/\/claude\.ai\/"/);
     assert.match(sessionRefresh, /"https:\/\/gemini\.google\.com\/"/);
     assert.match(background, /polychat-ai:refresh-session/);
+    assert.doesNotMatch(background, /ensureServerPermission\(serverUrl\)/);
+    assert.match(popup, /await ensureServerPermission\(sessionServerUrl\);/);
+    assert.match(webext, /permissions\.contains/);
     assert.match(remote, /Use https:\/\/ for remote servers, or http:\/\/127\.0\.0\.1 \/ http:\/\/localhost for local development/);
     assert.match(doc, /persists across restarts/);
     assert.match(doc, /reload or reinstall/);

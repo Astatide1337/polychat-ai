@@ -1,4 +1,4 @@
-import { permissionsRequest } from "./webext.js";
+import { permissionsContains, permissionsRequest } from "./webext.js";
 
 export function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -23,7 +23,9 @@ export function serverOriginPattern(serverUrl: string): string | null {
 export async function ensureServerPermission(serverUrl: string): Promise<void> {
   const originPattern = serverOriginPattern(serverUrl);
   if (!originPattern) return;
-  const granted = await permissionsRequest({ origins: [originPattern] });
+  const request = { origins: [originPattern] };
+  if (await permissionsContains(request)) return;
+  const granted = await permissionsRequest(request);
   if (!granted) {
     throw new Error(`Permission required to access ${new URL(serverUrl).origin}`);
   }

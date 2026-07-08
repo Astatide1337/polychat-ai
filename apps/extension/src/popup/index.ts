@@ -136,6 +136,7 @@ async function refreshSession() {
   const sessionApiKey = sessionApiKeyInput?.value.trim() || "";
   setText(result, "Refreshing session...");
   try {
+    await ensureServerPermission(sessionServerUrl);
     const response = await runtimeSendMessage<{
       ok?: boolean;
       error?: string;

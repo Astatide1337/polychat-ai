@@ -1,6 +1,5 @@
 import { loadSettings, saveSettings, type ExtensionSettings } from "../config.js";
 import { getHealth } from "../ingest-client.js";
-import { ensureServerPermission } from "../remote.js";
 import { refreshProviderSession } from "../session-refresh.js";
 import {
   syncAll as syncAllProviders,
@@ -61,7 +60,6 @@ async function syncSnapshot(provider: ProviderId, snapshot: any, serverUrl: stri
 }
 
 async function refreshSession(provider: RefreshableProviderId, serverUrl: string, apiKey: string) {
-  await ensureServerPermission(serverUrl);
   return refreshProviderSession(provider, serverUrl, apiKey);
 }
 

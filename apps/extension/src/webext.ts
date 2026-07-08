@@ -329,3 +329,37 @@ export async function permissionsRequest(request: {
     });
   });
 }
+
+export async function permissionsContains(request: {
+  origins?: string[];
+  permissions?: string[];
+}): Promise<boolean> {
+  const browserApi = typeof browser !== "undefined"
+    ? (browser as
+        | {
+            permissions?: {
+              contains(params: { origins?: string[]; permissions?: string[] }): Promise<boolean>;
+            };
+          }
+        | undefined)
+    : undefined;
+  const browserResult = browserApi?.permissions?.contains?.(request);
+  if (browserResult && typeof browserResult.then === "function") {
+    return browserResult;
+  }
+
+  const api = getApi();
+  if (!api?.permissions?.contains) {
+    throw new Error("permissions API is unavailable");
+  }
+  return await new Promise<boolean>((resolve, reject) => {
+    api.permissions.contains(request, (hasPermission: boolean) => {
+      const error = getLastError();
+      if (error) {
+        reject(new Error(error));
+        return;
+      }
+      resolve(Boolean(hasPermission));
+    });
+  });
+}
