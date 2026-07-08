@@ -261,6 +261,37 @@ export async function tabsReload(tabId: number): Promise<void> {
         return;
       }
       resolve();
+      });
+  });
+}
+
+export async function cookiesGetAll(details: Record<string, unknown>): Promise<any[]> {
+  const browserApi = typeof browser !== "undefined"
+    ? (browser as
+        | {
+            cookies?: {
+              getAll(params: Record<string, unknown>): Promise<any[]>;
+            };
+          }
+        | undefined)
+    : undefined;
+  const browserResult = browserApi?.cookies?.getAll?.(details);
+  if (browserResult && typeof browserResult.then === "function") {
+    return browserResult;
+  }
+
+  const api = getApi();
+  if (!api?.cookies?.getAll) {
+    throw new Error("cookies API is unavailable");
+  }
+  return await new Promise<any[]>((resolve, reject) => {
+    api.cookies.getAll(details, (cookies: any[]) => {
+      const error = getLastError();
+      if (error) {
+        reject(new Error(error));
+        return;
+      }
+      resolve(cookies ?? []);
     });
   });
 }

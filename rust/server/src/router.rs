@@ -51,7 +51,7 @@ pub fn build_router(
             get(move || models::list_models_handler(r_models.clone())),
         )
         .route(
-            "/v1/models/{model_id}",
+            "/v1/models/:model_id",
             get(move |path: axum::extract::Path<String>| {
                 let r = r_models_get.clone();
                 async move { models::get_model_handler(path, r).await }
@@ -87,18 +87,15 @@ pub fn build_router(
             ),
         )
         .route(
-            "/v1/sessions/{provider}",
-            post(
-                move |path: axum::extract::Path<String>,
-                      body: axum::Json<crate::session::TransportEnvelope>| {
-                    let p = p_sessions_push.clone();
-                    let r = r_sessions.clone();
-                    async move { sessions::push_session_handler(path, body, p, r).await }
-                },
-            ),
+            "/v1/sessions/:provider",
+            post(move |path: axum::extract::Path<String>, body: axum::Json<serde_json::Value>| {
+                let p = p_sessions_push.clone();
+                let r = r_sessions.clone();
+                async move { sessions::push_session_handler(path, body, p, r).await }
+            }),
         )
         .route(
-            "/v1/sessions/{provider}",
+            "/v1/sessions/:provider",
             delete(move |path: axum::extract::Path<String>| {
                 let p = p_sessions_delete.clone();
                 let r = r_sessions_delete.clone();

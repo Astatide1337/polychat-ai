@@ -46,7 +46,7 @@ Most API errors return:
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions |
 | `GET` | `/v1/conversations?provider=<id>` | List provider-side conversations |
 | `POST` | `/v1/conversations` | Create a provider-side conversation when supported |
-| `POST` | `/v1/sessions/:provider` | Push a sealed session envelope |
+| `POST` | `/v1/sessions/:provider` | Push a browser session envelope or raw storage state |
 | `DELETE` | `/v1/sessions/:provider` | Delete a saved session |
 | `POST` | `/api/generate` | Ollama-compatible generate endpoint |
 
@@ -306,7 +306,13 @@ Notes:
 
 ### `POST /v1/sessions/:provider`
 
-Accepts a sealed transport envelope produced by `polychat session export` or `polychat session push`.
+Accepts either:
+
+- a sealed transport envelope produced by `polychat session export` or `polychat session push`
+- a raw browser storage state JSON payload uploaded by the browser extension after a fresh login
+
+The raw browser payload must contain at least a `cookies` array and may also include `origins`.
+The server normalizes and stores either form before refreshing the provider registry.
 
 ### `DELETE /v1/sessions/:provider`
 

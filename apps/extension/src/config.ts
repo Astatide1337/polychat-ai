@@ -16,7 +16,10 @@ export type SyncCache = Record<ProviderId, Record<string, ConversationSyncCacheE
 export type ExtensionSettings = {
   serverUrl: string;
   ingestToken: string;
+  sessionServerUrl: string;
+  sessionApiKey: string;
   lastSyncAt: string | null;
+  lastSessionRefreshAt: string | null;
   lastResult: string | null;
   testConversationIds: Record<ProviderId, string>;
   syncCache: SyncCache;
@@ -86,7 +89,10 @@ export function normalizeSettings(settings: Partial<ExtensionSettings>): Extensi
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   serverUrl: "http://127.0.0.1:3333",
   ingestToken: "",
+  sessionServerUrl: "http://127.0.0.1:1443",
+  sessionApiKey: "",
   lastSyncAt: null,
+  lastSessionRefreshAt: null,
   lastResult: null,
   testConversationIds: {
     chatgpt: "",

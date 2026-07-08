@@ -56,6 +56,8 @@ describe("Production readiness", () => {
   it("package metadata supports npm release checks and binary artifacts", () => {
     const pkg = readJson("package.json");
     const extensionPkg = readJson("apps/extension/package.json");
+    const extensionManifest = readJson("apps/extension/manifest.json");
+    const extensionPopup = read("apps/extension/popup.html");
     assert.equal(pkg.name, "polychat-ai");
     assert.deepEqual(pkg.files.includes("bin"), true);
     assert.match(pkg.scripts.prepack, /npm run build/);
@@ -69,9 +71,33 @@ describe("Production readiness", () => {
     assert.equal(pkg.scripts.prepublishOnly, "npm run verify && npm run verify:package:all");
     assert.equal(pkg.scripts["pack:check"], "npm pack --dry-run");
     assert.match(extensionPkg.scripts.build, /tsc -p tsconfig\.json --noEmit/);
+    assert.ok(extensionManifest.permissions.includes("cookies"), "extension must request cookies access");
+    assert.ok(extensionManifest.permissions.includes("https://chatgpt.com/*"), "extension must request ChatGPT auth access");
+    assert.ok(extensionManifest.permissions.includes("https://claude.ai/*"), "extension must request Claude auth access");
+    assert.ok(extensionManifest.permissions.includes("https://gemini.google.com/*"), "extension must request Gemini auth access");
+    assert.match(extensionPopup, /id="refresh-session"/);
+    assert.match(extensionPopup, /id="sessionServerUrl"/);
+    assert.match(extensionPopup, /id="sessionApiKey"/);
     assert.ok(pkg.repository?.url, "repository URL must be present");
     assert.ok(pkg.bugs?.url, "bugs URL must be present");
     assert.ok(pkg.homepage, "homepage must be present");
+  });
+
+  it("extension refresh flow stays provider-specific and has explicit remote URL guidance", () => {
+    const sessionRefresh = read("apps/extension/src/session-refresh.ts");
+    const remote = read("apps/extension/src/remote.ts");
+    const background = read("apps/extension/src/background/index.ts");
+    const doc = read("docs/polychat-ai-extension.md");
+    assert.match(sessionRefresh, /type RefreshableProvider = Extract<ProviderId, "chatgpt" \| "claude" \| "gemini">/);
+    assert.match(sessionRefresh, /"https:\/\/chatgpt\.com\/"/);
+    assert.match(sessionRefresh, /"https:\/\/claude\.ai\/"/);
+    assert.match(sessionRefresh, /"https:\/\/gemini\.google\.com\/"/);
+    assert.match(background, /polychat-ai:refresh-session/);
+    assert.match(remote, /Use https:\/\/ for remote servers, or http:\/\/127\.0\.0\.1 \/ http:\/\/localhost for local development/);
+    assert.match(doc, /persists across restarts/);
+    assert.match(doc, /reload or reinstall/);
+    assert.match(doc, /No cookies found/);
+    assert.match(doc, /Permission required/);
   });
 
   it("CI workflow runs TypeScript Rust and npm pack gates", () => {
