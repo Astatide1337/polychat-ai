@@ -6,6 +6,7 @@ import { build } from "esbuild";
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const dist = resolve(root, process.env.POLYCHAT_EXTENSION_DIST_DIR || "dist");
 const testMode = process.env.POLYCHAT_EXTENSION_TEST_MODE === "1";
+const sourcemap = process.env.POLYCHAT_EXTENSION_SOURCEMAP === "1";
 
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
@@ -26,7 +27,7 @@ await build({
     "process.env.POLYCHAT_EXTENSION_TEST_MODE": testMode ? "true" : "false",
   },
   minifySyntax: true,
-  sourcemap: true,
+  sourcemap,
   logLevel: "info",
 });
 

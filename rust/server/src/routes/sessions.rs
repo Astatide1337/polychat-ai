@@ -59,7 +59,7 @@ fn check_rate_limit(api_key: &str) -> bool {
 
 pub async fn push_session_handler(
     Path(provider): Path<String>,
-    Json(envelope): Json<TransportEnvelope>,
+    Json(payload): Json<Value>,
     providers: Providers,
     registry: SharedModelRegistry,
 ) -> (StatusCode, Json<Value>) {
@@ -107,50 +107,6 @@ pub async fn push_session_handler(
         );
     }
 
-    // Validate envelope
-    if envelope.v != 1 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": {
-                    "message": "Invalid envelope format. Expected v1 transport envelope.",
-                    "type": "invalid_request_error",
-                    "code": "invalid_envelope"
-                }
-            })),
-        );
-    }
-
-    if envelope.provider != provider {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": {
-                    "message": format!("Envelope provider \"{}\" does not match URL provider \"{}\"", envelope.provider, provider),
-                    "type": "invalid_request_error",
-                    "code": "provider_mismatch"
-                }
-            })),
-        );
-    }
-
-    // Check envelope age (1 hour max)
-    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&envelope.created_at) {
-        let age = chrono::Utc::now() - created.with_timezone(&chrono::Utc);
-        if age.num_seconds() > 3600 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "Envelope has expired. Generate a new one with polychat session push.",
-                        "type": "invalid_request_error",
-                        "code": "envelope_expired"
-                    }
-                })),
-            );
-        }
-    }
-
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
@@ -167,38 +123,85 @@ pub async fn push_session_handler(
         }
     };
 
-    // Unseal
-    let session_json = match unseal_transport_envelope(&envelope, &api_key, &config.session_salt) {
-        Ok(j) => j,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "Failed to decrypt session envelope. Check that --api-key matches the server's POLYCHAT_API_KEY.",
-                        "type": "invalid_request_error",
-                        "code": "decryption_failed"
-                    }
-                })),
-            );
-        }
-    };
+    let mut session = if payload.get("v").and_then(|v| v.as_u64()) == Some(1) {
+        let envelope: TransportEnvelope = match serde_json::from_value(payload.clone()) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Invalid envelope format. Expected v1 transport envelope.",
+                            "type": "invalid_request_error",
+                            "code": "invalid_envelope"
+                        }
+                    })),
+                );
+            }
+        };
 
-    // Parse and validate
-    let mut session: Value = match serde_json::from_str(&session_json) {
-        Ok(v) => v,
-        Err(_) => {
+        if envelope.provider != provider {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": {
-                        "message": "Session payload is not valid JSON.",
+                        "message": format!("Envelope provider \"{}\" does not match URL provider \"{}\"", envelope.provider, provider),
                         "type": "invalid_request_error",
-                        "code": "invalid_session_json"
+                        "code": "provider_mismatch"
                     }
                 })),
             );
         }
+
+        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&envelope.created_at) {
+            let age = chrono::Utc::now() - created.with_timezone(&chrono::Utc);
+            if age.num_seconds() > 3600 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Envelope has expired. Generate a new one with polychat session push.",
+                            "type": "invalid_request_error",
+                            "code": "envelope_expired"
+                        }
+                    })),
+                );
+            }
+        }
+
+        let session_json = match unseal_transport_envelope(&envelope, &api_key, &config.session_salt) {
+            Ok(j) => j,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Failed to decrypt session envelope. Check that --api-key matches the server's POLYCHAT_API_KEY.",
+                            "type": "invalid_request_error",
+                            "code": "decryption_failed"
+                        }
+                    })),
+                );
+            }
+        };
+
+        match serde_json::from_str::<Value>(&session_json) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Session payload is not valid JSON.",
+                            "type": "invalid_request_error",
+                            "code": "invalid_session_json"
+                        }
+                    })),
+                );
+            }
+        }
+    } else {
+        payload
     };
 
     let has_cookies = session

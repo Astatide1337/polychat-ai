@@ -249,6 +249,7 @@
             <strong>Polychat-AI</strong>
           </div>
           <small id="lastSync">Not synced yet.</small>
+          <small id="lastSessionRefresh">Not refreshed yet.</small>
         </div>
         <div id="serverStatus" class="server-summary" aria-live="polite">Unknown</div>
       </header>
@@ -288,6 +289,18 @@
             <button class="ghost" id="sync-gemini" type="button">Gemini</button>
           </div>
         </div>
+
+        <div class="divider"></div>
+
+        <label>
+          <span class="field-label">Polychat API URL</span>
+          <input id="sessionServerUrl" placeholder="http://127.0.0.1:1443" />
+        </label>
+        <label>
+          <span class="field-label">Polychat API key (optional)</span>
+          <input id="sessionApiKey" type="password" placeholder="POLYCHAT_API_KEY" />
+        </label>
+        <button class="secondary" id="refresh-session" type="button">Refresh session</button>
       </section>
 
       <details class="shell panel">

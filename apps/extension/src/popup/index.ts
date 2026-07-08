@@ -1,16 +1,20 @@
 import { loadSettings, saveSettings } from "../config.js";
 import { getSyncStatus } from "../ingest-client.js";
+import { ensureServerPermission, validateServerUrl } from "../remote.js";
 import {
   syncAll as syncAllProviders,
   syncConversation as syncConversationWithCache,
   syncProvider as syncProviderWithCache,
   type SyncResult,
 } from "../sync.js";
-import { permissionsRequest } from "../webext.js";
+import { runtimeSendMessage } from "../webext.js";
 
 const serverUrlInput = document.getElementById("serverUrl") as HTMLInputElement | null;
 const ingestTokenInput = document.getElementById("ingestToken") as HTMLInputElement | null;
+const sessionServerUrlInput = document.getElementById("sessionServerUrl") as HTMLInputElement | null;
+const sessionApiKeyInput = document.getElementById("sessionApiKey") as HTMLInputElement | null;
 const saveButton = document.getElementById("save") as HTMLButtonElement | null;
+const refreshSessionButton = document.getElementById("refresh-session") as HTMLButtonElement | null;
 const syncChatgptButton = document.getElementById("sync-chatgpt") as HTMLButtonElement | null;
 const syncClaudeButton = document.getElementById("sync-claude") as HTMLButtonElement | null;
 const syncGeminiButton = document.getElementById("sync-gemini") as HTMLButtonElement | null;
@@ -25,53 +29,28 @@ const syncTestChatgptButton = document.getElementById("sync-test-chatgpt") as HT
 const syncTestClaudeButton = document.getElementById("sync-test-claude") as HTMLButtonElement | null;
 const syncTestGeminiButton = document.getElementById("sync-test-gemini") as HTMLButtonElement | null;
 const lastSync = document.getElementById("lastSync");
+const lastSessionRefresh = document.getElementById("lastSessionRefresh");
 const result = document.getElementById("result");
 const serverStatus = document.getElementById("serverStatus");
 const autoTestParams = new URLSearchParams(location.search);
 const AUTO_TEST_PARAM = ["auto", "test"].join("");
 type ProviderId = "chatgpt" | "claude" | "gemini";
 
-function isLoopbackHostname(hostname: string): boolean {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
-}
-
-function serverOriginPattern(serverUrl: string): string | null {
-  const url = new URL(serverUrl);
-  if (url.protocol !== "https:" || isLoopbackHostname(url.hostname)) return null;
-  if (url.hostname === "polychat.astatide.com") return null;
-  return `${url.protocol}//${url.host}/*`;
-}
-
-async function ensureServerPermission(serverUrl: string): Promise<void> {
-  const originPattern = serverOriginPattern(serverUrl);
-  if (!originPattern) return;
-  const granted = await permissionsRequest({ origins: [originPattern] });
-  if (!granted) {
-    throw new Error(`Permission required to access ${new URL(serverUrl).origin}`);
-  }
-}
-
 function setText(node: HTMLElement | null, value: string): void {
   if (node) node.textContent = value;
-}
-
-function validateServerUrl(value: string): string {
-  const url = new URL(value.trim() || "http://127.0.0.1:3333");
-  const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  if (url.protocol === "https:" || (url.protocol === "http:" && isLoopback)) {
-    return url.toString();
-  }
-  throw new Error("Use https:// for remote servers");
 }
 
 async function refresh(options: { keepResult?: boolean } = {}): Promise<void> {
   const settings = await loadSettings();
   if (serverUrlInput) serverUrlInput.value = settings.serverUrl;
   if (ingestTokenInput) ingestTokenInput.value = settings.ingestToken;
+  if (sessionServerUrlInput) sessionServerUrlInput.value = settings.sessionServerUrl;
+  if (sessionApiKeyInput) sessionApiKeyInput.value = settings.sessionApiKey;
   if (testChatgptInput) testChatgptInput.value = settings.testConversationIds.chatgpt;
   if (testClaudeInput) testClaudeInput.value = settings.testConversationIds.claude;
   if (testGeminiInput) testGeminiInput.value = settings.testConversationIds.gemini;
-  setText(lastSync, settings.lastSyncAt ?? "Not synced yet.");
+  setText(lastSync, `History sync: ${settings.lastSyncAt ?? "not yet."}`);
+  setText(lastSessionRefresh, `Session refresh: ${settings.lastSessionRefreshAt ?? "not yet."}`);
   if (!options.keepResult) {
     setText(result, settings.lastResult ?? "Idle.");
   }
@@ -151,6 +130,35 @@ async function syncConversation() {
   await refresh({ keepResult: true });
 }
 
+async function refreshSession() {
+  const provider = (conversationProviderSelect?.value || "chatgpt") as ProviderId;
+  const sessionServerUrl = validateServerUrl(sessionServerUrlInput?.value.trim() || "http://127.0.0.1:1443");
+  const sessionApiKey = sessionApiKeyInput?.value.trim() || "";
+  setText(result, "Refreshing session...");
+  try {
+    const response = await runtimeSendMessage<{
+      ok?: boolean;
+      error?: string;
+      provider?: string;
+      status?: string;
+      message?: string;
+      cookies?: number;
+    }>({
+      type: "polychat-ai:refresh-session",
+      provider,
+      serverUrl: sessionServerUrl,
+      apiKey: sessionApiKey,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Session refresh failed");
+    }
+    setText(result, JSON.stringify(response, null, 2));
+  } catch (error) {
+    setText(result, error instanceof Error ? error.message : String(error));
+  }
+  await refresh({ keepResult: true });
+}
+
 async function syncTestConversation(provider: "chatgpt" | "claude" | "gemini") {
   if (!process.env.POLYCHAT_EXTENSION_TEST_MODE) {
     setText(result, "test mode disabled");
@@ -211,10 +219,14 @@ async function runAutoTest(): Promise<void> {
 saveButton?.addEventListener("click", async () => {
   try {
     const serverUrl = validateServerUrl(serverUrlInput?.value.trim() || "http://127.0.0.1:3333");
+    const sessionServerUrl = validateServerUrl(sessionServerUrlInput?.value.trim() || "http://127.0.0.1:1443");
     await ensureServerPermission(serverUrl);
+    await ensureServerPermission(sessionServerUrl);
     const settings = await saveSettings({
       serverUrl,
       ingestToken: ingestTokenInput?.value.trim() || "",
+      sessionServerUrl,
+      sessionApiKey: sessionApiKeyInput?.value.trim() || "",
       testConversationIds: {
         chatgpt: testChatgptInput?.value.trim() || "",
         claude: testClaudeInput?.value.trim() || "",
@@ -232,6 +244,7 @@ syncClaudeButton?.addEventListener("click", () => void sync("polychat-ai:sync-pr
 syncGeminiButton?.addEventListener("click", () => void sync("polychat-ai:sync-provider", "gemini"));
 syncAllButton?.addEventListener("click", () => void sync("polychat-ai:sync-all"));
 syncConversationButton?.addEventListener("click", () => void syncConversation());
+refreshSessionButton?.addEventListener("click", () => void refreshSession());
 syncTestChatgptButton?.addEventListener("click", () => void syncTestConversation("chatgpt"));
 syncTestClaudeButton?.addEventListener("click", () => void syncTestConversation("claude"));
 syncTestGeminiButton?.addEventListener("click", () => void syncTestConversation("gemini"));

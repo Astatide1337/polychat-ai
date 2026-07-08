@@ -1,5 +1,7 @@
 import { loadSettings, saveSettings, type ExtensionSettings } from "../config.js";
 import { getHealth } from "../ingest-client.js";
+import { ensureServerPermission } from "../remote.js";
+import { refreshProviderSession } from "../session-refresh.js";
 import {
   syncAll as syncAllProviders,
   syncConversation as syncConversationWithCache,
@@ -10,6 +12,7 @@ import {
 import { tabsQuery, tabsSendMessage } from "../webext.js";
 
 type ProviderId = "chatgpt" | "claude" | "gemini";
+type RefreshableProviderId = ProviderId;
 
 const AUTO_INGEST_DEBOUNCE_MS = 30_000;
 const E2E_SCAN_ATTEMPTS = 20;
@@ -55,6 +58,11 @@ async function syncAll(): Promise<SyncResult> {
 
 async function syncSnapshot(provider: ProviderId, snapshot: any, serverUrl: string, ingestToken: string) {
   return syncSnapshotWithCache(provider, snapshot, serverUrl, ingestToken);
+}
+
+async function refreshSession(provider: RefreshableProviderId, serverUrl: string, apiKey: string) {
+  await ensureServerPermission(serverUrl);
+  return refreshProviderSession(provider, serverUrl, apiKey);
 }
 
 function getE2EParamsFromUrl(url: string): URLSearchParams | null {
@@ -281,6 +289,37 @@ chrome.runtime.onMessage.addListener((message: unknown, sender: { tab?: { id?: n
       : Promise.reject(new Error("provider required")))
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+  if (typed?.type === "polychat-ai:refresh-session") {
+    void (async () => {
+      const provider = (typed.provider ?? "chatgpt") as RefreshableProviderId;
+      const settings = await loadSettings();
+      const serverUrl = typeof (typed as { serverUrl?: string }).serverUrl === "string"
+        ? (typed as { serverUrl?: string }).serverUrl!
+        : settings.sessionServerUrl;
+      const apiKey = typeof (typed as { apiKey?: string }).apiKey === "string"
+        ? (typed as { apiKey?: string }).apiKey!
+        : settings.sessionApiKey;
+
+      try {
+        const result = await refreshSession(provider, serverUrl, apiKey);
+        await saveSettings({
+          ...settings,
+          sessionServerUrl: serverUrl,
+          sessionApiKey: apiKey,
+          ...(result.ok ? { lastSessionRefreshAt: new Date().toISOString() } : {}),
+        });
+        sendResponse(result);
+      } catch (error) {
+        await saveSettings({
+          ...settings,
+          sessionServerUrl: serverUrl,
+          sessionApiKey: apiKey,
+        });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
     return true;
   }
   if (typed?.type === "polychat-ai:page-ready") {
