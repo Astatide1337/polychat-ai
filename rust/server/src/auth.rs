@@ -16,8 +16,9 @@ pub async fn auth_middleware(req: Request<Body>, next: Next) -> Response {
         None => return next.run(req).await, // No API key configured → no auth
     };
 
-    // /health is intentionally public. API routes remain protected.
-    if req.method() == "GET" && req.uri().path() == "/health" {
+    // Health endpoints are intentionally public. API routes remain protected.
+    let path = req.uri().path();
+    if req.method() == "GET" && (path == "/health" || path == "/api/health" || path == "/proxy/polychat/health") {
         return next.run(req).await;
     }
 
