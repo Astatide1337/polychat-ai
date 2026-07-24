@@ -31,15 +31,30 @@ async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unk
   return text.trim() ? JSON.parse(text) : null;
 }
 
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  "access-control-max-age": "86400",
+};
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS });
   res.end(JSON.stringify(body));
+}
+
+function sendOptions(res: ServerResponse): void {
+  res.writeHead(204, CORS_HEADERS);
+  res.end();
 }
 
 export function startHttpServer(config: McpAppConfig, db: SqliteDatabase) {
   const handlers = createIngestHandlers(config, db);
   const server = createServer(async (req, res) => {
     try {
+      if (req.method === "OPTIONS") {
+        return sendOptions(res);
+      }
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (req.method === "GET" && url.pathname === "/health") {
         const response = handlers.health();
