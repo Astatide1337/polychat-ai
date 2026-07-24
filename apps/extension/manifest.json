@@ -23,7 +23,6 @@
     "https://accounts.google.com/*",
     "https://*.google.com/*",
     "https://polychat.astatide.com/*",
-    "https://history.astatide.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
