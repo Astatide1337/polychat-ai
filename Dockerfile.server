@@ -1,0 +1,25 @@
+FROM rust:1.96-bookworm AS builder
+
+WORKDIR /app
+COPY rust/ ./rust/
+WORKDIR /app/rust
+RUN cargo build --release --bin polychat-server
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 wget && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 polychat
+COPY --from=builder /app/rust/target/release/polychat-server /usr/local/bin/polychat-server
+
+ENV HOME=/data
+RUN mkdir -p /data && chown -R polychat:polychat /data
+VOLUME ["/data"]
+
+USER polychat
+WORKDIR /data
+EXPOSE 1443
+
+ENTRYPOINT ["/usr/local/bin/polychat-server", "--port", "1443", "--host", "0.0.0.0"]
