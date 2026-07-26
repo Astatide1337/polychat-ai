@@ -154,9 +154,10 @@ export async function loginWithOAuth(providerId: string): Promise<void> {
     throw new Error(`Unknown OAuth provider: ${providerId}`);
   }
 
-  // 1. PKCE
+  // 1. PKCE + state
   const verifier = await generateVerifier();
   const challenge = await computeChallenge(verifier);
+  const state = await generateVerifier(); // random CSRF token
 
   // 2. Derive the callback port from redirect URI
   const redirectUrl = new URL(provider.redirectUri);
@@ -172,6 +173,20 @@ export async function loginWithOAuth(providerId: string): Promise<void> {
 
       const code = reqUrl.searchParams.get("code");
       const error = reqUrl.searchParams.get("error");
+      const returnedState = reqUrl.searchParams.get("state");
+
+      // Validate state to prevent CSRF
+      if (returnedState !== state) {
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(ERROR_HTML);
+        rejectCode(
+          new Error(
+            `OAuth CSRF: state mismatch (expected ${state.slice(0, 8)}..., got ${returnedState?.slice(0, 8) ?? "none"}...)`,
+          ),
+        );
+        server.close();
+        return;
+      }
 
       if (code) {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -202,6 +217,7 @@ export async function loginWithOAuth(providerId: string): Promise<void> {
     scope: provider.scopes.join(" "),
     code_challenge: challenge,
     code_challenge_method: "S256",
+    state,
   });
 
   const authUrl = `${provider.authorizeUrl}?${authParams.toString()}`;

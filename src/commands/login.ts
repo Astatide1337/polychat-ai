@@ -163,18 +163,20 @@ export function registerLoginCommand(program: Command) {
       try {
         const info = getLoginInfo(provider);
 
-        if (provider === "chatgpt") {
-        // ChatGPT login: prefer Firefox profile reading over OAuth.
+        if (provider === "chatgpt" || provider === "claude") {
+        // Prefer Firefox profile reading over OAuth for ChatGPT and Claude.
         // The OAuth path saves {type: "oauth"} tokens that the Rust provider
         // cannot use (it needs cookie-based storageState with accessToken).
-        // Since chatgpt.com is typically already logged in via the browser,
+        // Since these sites are typically already logged in via the browser,
         // reading from the Firefox profile is faster and produces the right format.
         const profileDir = findFirefoxProfileDirForProvider(provider);
         if (profileDir) {
           const state = readFirefoxStorageState(profileDir);
           if (state && hasProviderSessionArtifacts(provider, state)) {
             const filteredState = filterStateForProvider(provider, state);
-            const hydratedState = await maybeHydrateChatGptState(filteredState);
+            const hydratedState = provider === "chatgpt"
+              ? await maybeHydrateChatGptState(filteredState)
+              : filteredState;
             const storageState = toPlaywrightStorageState(hydratedState!);
             saveSession(provider, storageState);
             markProviderConnected(provider, info.defaultModel);
@@ -182,7 +184,7 @@ export function registerLoginCommand(program: Command) {
             return;
           }
         }
-        // No Firefox profile with ChatGPT cookies — fall through to OAuth
+        // No Firefox profile with provider cookies — fall through to OAuth
       }
 
       if (provider in OAUTH_PROVIDERS) {
