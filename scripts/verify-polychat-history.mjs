@@ -808,12 +808,12 @@ async function runMcpToolChecksViaHelper(dbPath, entrypoint, liveProviderChecks 
 
     const toolList = await rpc.request("tools/list");
     const resourceList = await rpc.request("resources/list");
-    const listConversations = await rpc.callTool("list_conversations", {
+    const listConversations = await rpc.callTool("list_polychat_conversations", {
       provider: "chatgpt",
       includeRaw: false,
       limit: 20,
     });
-    const listConversationsWithRaw = await rpc.callTool("list_conversations", {
+    const listConversationsWithRaw = await rpc.callTool("list_polychat_conversations", {
       provider: "chatgpt",
       includeRaw: true,
       limit: 20,
