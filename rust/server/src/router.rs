@@ -1,5 +1,6 @@
 //! Axum router assembly.
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::collections::HashMap;
@@ -175,6 +176,8 @@ pub fn build_router(
             let r = rs_proxy.clone();
             async move { sessions::push_session_handler(path, body, p, r).await }
         }))
+        // Increase body limit for session push (ChatGPT session can be ~7.5MB)
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB
         .route("/v1/sessions/:provider", delete(move |path: axum::extract::Path<String>| {
             let p = sd.clone();
             let r = rsd.clone();
