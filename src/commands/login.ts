@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { loginWithOAuth, OAUTH_PROVIDERS } from "../browser/oauth.js";
 import { detectBrowserKind } from "../browser/detect.js";
 import { loginWithCDP, type CdpCookie } from "../browser/cdp.js";
 import {
@@ -164,11 +163,7 @@ export function registerLoginCommand(program: Command) {
         const info = getLoginInfo(provider);
 
         if (provider === "chatgpt" || provider === "claude") {
-        // Prefer Firefox profile reading over OAuth for ChatGPT and Claude.
-        // The OAuth path saves {type: "oauth"} tokens that the Rust provider
-        // cannot use (it needs cookie-based storageState with accessToken).
-        // Since these sites are typically already logged in via the browser,
-        // reading from the Firefox profile is faster and produces the right format.
+        // Rust providers require cookie sessions; OAuth tokens are unsupported.
         const profileDir = findFirefoxProfileDirForProvider(provider);
         if (profileDir) {
           const state = readFirefoxStorageState(profileDir);
@@ -184,14 +179,11 @@ export function registerLoginCommand(program: Command) {
             return;
           }
         }
-        // No Firefox profile with provider cookies — fall through to OAuth
-      }
-
-      if (provider in OAUTH_PROVIDERS) {
-        await loginWithOAuth(provider);
-        markProviderConnected(provider, info.defaultModel);
-        console.log(`✓ Logged in to ${info.name} successfully. Session saved.`);
-        return;
+        throw new Error(
+          `No authenticated Firefox or Zen session was found for ${info.name}. ` +
+          `Sign in to ${info.loginUrl} in Firefox or Zen, then run ` +
+          `"polychat login ${provider}" again. No session was changed.`,
+        );
       }
 
       const browserInfo = await detectBrowserKind();
